@@ -14,12 +14,14 @@ pub const NITTER_BASES: &[&str] = &[
     "https://nitter.poast.org",
 ];
 
-// Brand
+// Brand — Bull desk ink / acid, Surfboard-adjacent matrix
 pub const ACID: ratatui::style::Color = ratatui::style::Color::Rgb(200, 245, 66);
 pub const MUTED: ratatui::style::Color = ratatui::style::Color::Rgb(107, 111, 100);
-pub const PANEL_BG: ratatui::style::Color = ratatui::style::Color::Rgb(18, 20, 16);
+pub const PANEL_BG: ratatui::style::Color = ratatui::style::Color::Rgb(12, 14, 11);
 pub const BORDER: ratatui::style::Color = ratatui::style::Color::Rgb(42, 46, 36);
+pub const FG: ratatui::style::Color = ratatui::style::Color::Rgb(200, 208, 184);
 pub const TWEET_FG: ratatui::style::Color = ratatui::style::Color::Rgb(125, 222, 160);
+pub const POST_FG: ratatui::style::Color = ratatui::style::Color::Rgb(80, 200, 120);
 pub const WARN: ratatui::style::Color = ratatui::style::Color::Rgb(230, 184, 77);
 pub const BAD: ratatui::style::Color = ratatui::style::Color::Rgb(227, 93, 93);
 

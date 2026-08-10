@@ -2,7 +2,9 @@
 
 Surfboard-style **Rust TUI** for **Bull.inf** — stalk **$ANSEM** and **@blknoiz06** from your shell.
 
-Multi-pane dashboard with **scrollable sections** (ratatui). Tab-focus a pane, then `j/k` / arrows / mouse wheel to scroll.
+Multi-pane dashboard with **scrollable sections** (ratatui). Hero-first KPI cards, colored `POST` badges, dual sparklines, holder distribution, audit signals. Tab-focus a pane, then `j/k` / arrows / mouse wheel to scroll.
+
+**v0.3** visual polish pass — closer to MAXPANE / Surfboard hierarchy.
 
 ```
 BULLBOARD · $ANSEM · @blknoiz06 · feed · activity

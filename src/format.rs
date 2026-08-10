@@ -1,7 +1,5 @@
 use chrono::{DateTime, Local, Utc};
 
-// Utc used by age_from_ms
-
 const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 pub fn fmt_usd(x: Option<f64>) -> String {
@@ -114,7 +112,6 @@ pub fn parse_iso(s: &str) -> Option<DateTime<Utc>> {
         .ok()
         .map(|d| d.with_timezone(&Utc))
         .or_else(|| {
-            // tolerate trailing Z already handled by rfc3339; try without fractional
             let cleaned = s.replace('Z', "+00:00");
             DateTime::parse_from_rfc3339(&cleaned)
                 .ok()
@@ -152,21 +149,12 @@ pub fn clock_mmdd_hhmm(iso: Option<&str>) -> String {
     local.format("%m-%d %H:%M").to_string()
 }
 
-pub fn rate_pct(x: Option<f64>) -> String {
-    match x {
-        None => "—".into(),
-        Some(v) => {
-            let p = if v.abs() <= 1.0 { v * 100.0 } else { v };
-            format!("{p:.1}%")
-        }
-    }
-}
-
 pub fn age_from_ms(ms: Option<u64>) -> String {
     let Some(ms) = ms else {
         return "—".into();
     };
-    let secs = (Utc::now().timestamp_millis() as u64).saturating_sub(ms) / 1000;
+    let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+    let secs = now_ms.saturating_sub(ms) / 1000;
     if secs < 3600 {
         format!("{}m", secs / 60)
     } else if secs < 86400 {
@@ -176,13 +164,27 @@ pub fn age_from_ms(ms: Option<u64>) -> String {
     }
 }
 
+/// Terminal-safe bar using half-width ASCII so columns stay aligned.
 pub fn bar(pct: Option<f64>, width: usize) -> String {
+    let width = width.max(4);
     let p = pct.unwrap_or(0.0).clamp(0.0, 100.0);
     let filled = ((p / 100.0) * width as f64).round() as usize;
     let filled = filled.min(width);
     format!(
-        "{}{}",
-        "█".repeat(filled),
-        "░".repeat(width.saturating_sub(filled))
+        "[{}{}]",
+        "#".repeat(filled),
+        "-".repeat(width.saturating_sub(filled))
     )
+}
+
+pub fn pad_label(label: &str, width: usize) -> String {
+    let mut s = label.to_string();
+    while s.chars().count() < width {
+        s.push(' ');
+    }
+    if s.chars().count() > width {
+        s.chars().take(width).collect()
+    } else {
+        s
+    }
 }

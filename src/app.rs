@@ -108,36 +108,36 @@ impl App {
         }
     }
 
+    /// Hero-first KPI: price, 24h, windows, flow — fits ~6 rows.
     fn lines_price_flow(&self) -> Vec<String> {
         let t = &self.snap.token;
         let s24 = &t.stats_24h;
-        let s1 = &t.stats_1h;
-        let s5 = &t.stats_5m;
+        let pair = t.primary_pair.as_ref();
         let vol24 = s24
             .buy_volume
             .zip(s24.sell_volume)
             .map(|(b, s)| b + s)
-            .or_else(|| t.primary_pair.as_ref().and_then(|p| p.vol_h24));
+            .or_else(|| pair.and_then(|p| p.vol_h24));
         vec![
-            format!("ANSEM     {}", fmt_usd(self.snap.price_usd())),
+            format!("ANSEM  {}", fmt_usd(self.snap.price_usd())),
+            format!("24h    {}", delta_str(self.snap.change_24h())),
             format!(
                 "5m {}  1h {}",
-                delta_str(s5.price_change.or_else(|| t.primary_pair.as_ref().and_then(|p| p.change_m5))),
-                delta_str(s1.price_change.or_else(|| t.primary_pair.as_ref().and_then(|p| p.change_h1)))
+                delta_str(t.stats_5m.price_change.or_else(|| pair.and_then(|p| p.change_m5))),
+                delta_str(t.stats_1h.price_change.or_else(|| pair.and_then(|p| p.change_h1)))
             ),
             format!(
-                "6h {}  24h {}",
-                delta_str(t.stats_6h.price_change.or_else(|| t.primary_pair.as_ref().and_then(|p| p.change_h6))),
-                delta_str(self.snap.change_24h())
+                "6h {}",
+                delta_str(t.stats_6h.price_change.or_else(|| pair.and_then(|p| p.change_h6)))
             ),
-            format!("vol 24h   {}", fmt_usd(vol24)),
+            format!("vol    {}", fmt_usd(vol24)),
             format!(
-                "traders   {}  net buyers {}",
+                "traders {}  net {}",
                 fmt_int(s24.traders),
                 fmt_int(s24.net_buyers)
             ),
             format!(
-                "buys/sell {} / {}",
+                "tx     {}B / {}S",
                 fmt_int(s24.buys),
                 fmt_int(s24.sells)
             ),
@@ -149,34 +149,24 @@ impl App {
         let Some(p) = t.primary_pair.as_ref() else {
             return vec![
                 "no pair data".into(),
-                format!("mint {}", short_addr(&t.mint, 6)),
+                format!("mint  {}", short_addr(&t.mint, 6)),
             ];
         };
         let total_liq: f64 = t.pairs.iter().filter_map(|x| x.liq_usd).sum();
+        let all = if total_liq > 0.0 {
+            Some(total_liq)
+        } else {
+            t.liquidity
+        };
         vec![
-            format!("{}  {}", p.dex_id.to_uppercase(), short_addr(&p.pair_address, 6)),
+            format!("{}  {}", p.dex_id.to_uppercase(), short_addr(&p.pair_address, 5)),
+            format!("liq     {}", fmt_usd(p.liq_usd)),
+            format!("all     {}  ({} pools)", fmt_usd(all), t.pairs.len()),
+            format!("base    {} ANSEM", fmt_compact(p.liq_base)),
+            format!("quote   {} {}", fmt_compact(p.liq_quote), p.quote_symbol),
+            format!("age     {}   vol {}", age_from_ms(p.pair_created_ms), fmt_usd(p.vol_h24)),
             format!(
-                "liq       {}",
-                fmt_usd(p.liq_usd)
-            ),
-            format!(
-                "base      {} ANSEM",
-                fmt_compact(p.liq_base)
-            ),
-            format!(
-                "quote     {} {}",
-                fmt_compact(p.liq_quote),
-                p.quote_symbol
-            ),
-            format!(
-                "age       {}   pairs {}",
-                age_from_ms(p.pair_created_ms),
-                t.pairs.len()
-            ),
-            format!("all liq   {}", fmt_usd(Some(total_liq).filter(|v| *v > 0.0).or(t.liquidity))),
-            format!("24h vol   {}", fmt_usd(p.vol_h24)),
-            format!(
-                "tx 24h    {}B / {}S",
+                "tx 24h  {}B / {}S",
                 fmt_int(p.buys_h24),
                 fmt_int(p.sells_h24)
             ),
@@ -189,63 +179,50 @@ impl App {
         let freeze_ok = t.freeze_auth_disabled.unwrap_or(false);
         let mut lines = vec![
             format!(
-                "mint auth  {}",
+                "mint    {}",
                 if mint_ok { "DISABLED ✓" } else { "ENABLED ⚠" }
             ),
             format!(
-                "freeze     {}",
+                "freeze  {}",
                 if freeze_ok { "DISABLED ✓" } else { "ENABLED ⚠" }
             ),
             format!(
-                "rug score  {}",
+                "rug     {}",
                 t.rug_score
                     .map(|s| format!("{s:.0}/100"))
                     .unwrap_or_else(|| "—".into())
             ),
             format!(
-                "organic    {}",
+                "organic {}",
                 t.organic_score
-                    .map(|s| format!(
-                        "{s:.1} {}",
-                        t.organic_label.as_deref().unwrap_or("")
-                    ))
+                    .map(|s| {
+                        let lab = t.organic_label.as_deref().unwrap_or("");
+                        format!("{s:.0} {lab}").trim().to_string()
+                    })
                     .unwrap_or_else(|| "—".into())
             ),
             format!(
-                "lp locked  {}",
+                "lp lock {}",
                 t.lp_locked_pct
                     .map(|p| format!("{p:.1}%"))
                     .unwrap_or_else(|| "n/a".into())
             ),
             format!(
-                "insiders   {}   markets {}",
+                "insider {}  mkts {}",
                 fmt_int(t.graph_insiders),
                 fmt_int(t.markets_n)
             ),
-            format!(
-                "verified   {}   rugged {}",
-                match t.is_verified {
-                    Some(true) => "yes",
-                    Some(false) => "no",
-                    None => "—",
-                },
-                match t.rugged {
-                    Some(true) => "YES",
-                    Some(false) => "no",
-                    None => "—",
-                }
-            ),
         ];
-        for r in t.risks.iter().take(4) {
+        for r in t.risks.iter().take(3) {
             let val = if r.value.is_empty() {
                 String::new()
             } else {
                 format!(" {}", r.value)
             };
-            lines.push(format!("· {} [{}]{}", r.name, r.level, val));
+            lines.push(format!("· {}{}", r.name, val));
         }
         if let Some(dev) = &t.dev {
-            lines.push(format!("dev {}", short_addr(dev, 4)));
+            lines.push(format!("dev     {}", short_addr(dev, 4)));
         }
         lines
     }
@@ -253,32 +230,26 @@ impl App {
     fn lines_supply(&self) -> Vec<String> {
         let t = &self.snap.token;
         let circ = t.circ_supply;
-        let total = t.total_supply.or(circ);
         vec![
-            format!("holders   {}", fmt_int(t.holder_count)),
+            format!("holders {}", fmt_int(t.holder_count)),
+            format!("24h     {}", delta_str(t.stats_24h.holder_change)),
+            format!("circ    {}", fmt_compact(circ)),
+            format!("total   {}", fmt_compact(t.total_supply.or(circ))),
             format!(
-                "24h Δ      {}",
-                delta_str(t.stats_24h.holder_change)
+                "mcap    {}",
+                fmt_usd(t.mcap.or_else(|| self.snap.ohlc_stat_f("market_cap")))
             ),
-            format!("circ      {}", fmt_compact(circ)),
-            format!("total     {}", fmt_compact(total)),
-            format!("mcap      {}", fmt_usd(t.mcap.or_else(|| self.snap.ohlc_stat_f("market_cap")))),
-            format!("fdv       {}", fmt_usd(t.fdv.or_else(|| self.snap.ohlc_stat_f("fdv")))),
             format!(
-                "launch    {} {}",
+                "fdv     {}",
+                fmt_usd(t.fdv.or_else(|| self.snap.ohlc_stat_f("fdv")))
+            ),
+            format!(
+                "launch  {} {}",
                 t.launchpad.as_deref().unwrap_or("—"),
                 t.graduated_at
                     .as_deref()
-                    .map(|s| &s[..10.min(s.len())])
+                    .map(|s| s.get(..10).unwrap_or(s))
                     .unwrap_or("")
-            ),
-            format!(
-                "tags      {}",
-                if t.tags.is_empty() {
-                    "—".into()
-                } else {
-                    t.tags.iter().take(4).cloned().collect::<Vec<_>>().join(",")
-                }
             ),
         ]
     }
@@ -288,7 +259,7 @@ impl App {
         if s.tweets.is_empty() {
             let mut lines = vec!["no posts in window".into()];
             if let Some(e) = &s.tweet_error {
-                lines.push(e.chars().take(100).collect());
+                lines.push(e.chars().take(90).collect());
             }
             return lines;
         }
@@ -304,11 +275,12 @@ impl App {
                 } else {
                     String::new()
                 };
+                // keep full-ish text; pane wraps
                 let mut text = t.text.replace('\n', " ");
-                if text.chars().count() > 160 {
-                    text = text.chars().take(157).collect::<String>() + "…";
+                if text.chars().count() > 220 {
+                    text = text.chars().take(217).collect::<String>() + "…";
                 }
-                format!("{when} POST  {prefix}{text}")
+                format!("{} POST {}{}", when, prefix, text)
             })
             .collect()
     }
@@ -332,63 +304,66 @@ impl App {
 
         let liq = t.liquidity.or_else(|| t.primary_pair.as_ref().and_then(|p| p.liq_usd));
         match liq {
-            Some(v) if v >= 500_000.0 => lines.push(format!("● LIQUIDITY    {} deep", fmt_usd(Some(v)))),
-            Some(v) if v >= 50_000.0 => lines.push(format!("◐ LIQUIDITY    {} thin", fmt_usd(Some(v)))),
+            Some(v) if v >= 500_000.0 => {
+                lines.push(format!("● LIQUIDITY    {} deep", fmt_usd(Some(v))))
+            }
+            Some(v) if v >= 50_000.0 => {
+                lines.push(format!("◐ LIQUIDITY    {} thin", fmt_usd(Some(v))))
+            }
             Some(v) => lines.push(format!("○ LIQUIDITY    {} low", fmt_usd(Some(v)))),
             None => lines.push("○ LIQUIDITY    no data".into()),
         }
 
         match t.stats_24h.holder_change {
-            Some(c) if c > 0.0 => lines.push(format!("● HOLDERS 24h  {} growing", delta_str(Some(c)))),
-            Some(c) if c < 0.0 => lines.push(format!("◐ HOLDERS 24h  {} shrinking", delta_str(Some(c)))),
+            Some(c) if c > 0.0 => {
+                lines.push(format!("● HOLDERS 24h  {} growing", delta_str(Some(c))))
+            }
+            Some(c) if c < 0.0 => {
+                lines.push(format!("◐ HOLDERS 24h  {} shrinking", delta_str(Some(c))))
+            }
             Some(_) => lines.push("◐ HOLDERS 24h  flat".into()),
             None => lines.push("◐ HOLDERS 24h  no data".into()),
         }
 
         match t.top10_pct.or(t.top_holders_pct) {
-            Some(p) if p >= 50.0 => lines.push(format!("◐ TOP10 CONC   {p:.1}% concentrated")),
+            Some(p) if p >= 50.0 => {
+                lines.push(format!("◐ TOP10 CONC   {p:.1}% concentrated"))
+            }
             Some(p) => lines.push(format!("● TOP10 CONC   {p:.1}% ok")),
             None => lines.push("◐ TOP10 CONC   —".into()),
         }
 
-        if let Some(p) = t.lp_locked_pct {
-            if p >= 50.0 {
-                lines.push(format!("● LP LOCKED    {p:.1}%"));
-            } else {
-                lines.push(format!("◐ LP LOCKED    {p:.1}%"));
-            }
-        } else {
-            lines.push("◐ LP LOCKED    n/a".into());
+        match t.lp_locked_pct {
+            Some(p) if p >= 50.0 => lines.push(format!("● LP LOCKED    {p:.1}%")),
+            Some(p) => lines.push(format!("◐ LP LOCKED    {p:.1}%")),
+            None => lines.push("◐ LP LOCKED    n/a".into()),
         }
 
         match t.rugged {
             Some(false) => lines.push("● RUG FLAG     clean".into()),
-            Some(true) => lines.push("○ RUG FLAG     RAGGED".into()),
+            Some(true) => lines.push("○ RUG FLAG     FLAGGED".into()),
             None => {}
+        }
+
+        if let Some(ch) = self.snap.change_24h() {
+            let mark = if ch >= 0.0 { "●" } else { "◐" };
+            lines.push(format!("{mark} PRICE 24h    {}", delta_str(Some(ch))));
         }
 
         let ready = self.snap.net_bool("solana_ready").unwrap_or(false);
         lines.push(format!(
-            "{} SOLANA RPC   {}",
+            "{} SOLANA       {}",
             if ready { "●" } else { "○" },
-            if ready { "ready" } else { "down" }
+            if ready { "rpc ready" } else { "down" }
         ));
 
-        if let Some(ch) = self.snap.change_24h() {
-            lines.push(format!("● PRICE 24h    {}", delta_str(Some(ch))));
+        if let Some(score) = t.organic_score {
+            lines.push(format!("● ORGANIC      {score:.0}"));
         }
 
-        for r in t.risks.iter().take(3) {
+        for r in t.risks.iter().take(2) {
             let mark = if r.level == "danger" { "○" } else { "◐" };
             lines.push(format!("{mark} RISK         {} {}", r.name, r.value));
-        }
-
-        for (k, e) in self.snap.errors.iter().take(3) {
-            lines.push(format!(
-                "○ {}  {}",
-                k.to_uppercase(),
-                e.chars().take(36).collect::<String>()
-            ));
         }
         lines
     }
@@ -396,8 +371,6 @@ impl App {
     fn lines_activity(&self) -> Vec<String> {
         let t = &self.snap.token;
         let mut lines = Vec::new();
-
-        // DEX flow windows
         lines.push("── dex flow ──".into());
         for (label, w) in [
             ("5m", &t.stats_5m),
@@ -405,50 +378,41 @@ impl App {
             ("6h", &t.stats_6h),
             ("24h", &t.stats_24h),
         ] {
-            let buy = w.buy_volume;
-            let sell = w.sell_volume;
             lines.push(format!(
                 "{label:<3} B {}  S {}  tr {}",
-                fmt_usd(buy),
-                fmt_usd(sell),
+                fmt_usd(w.buy_volume),
+                fmt_usd(w.sell_volume),
                 fmt_int(w.traders)
             ));
             lines.push(format!(
-                "    {}B/{}S  holders {}",
+                "    {}B/{}S  h {}",
                 fmt_int(w.buys),
                 fmt_int(w.sells),
                 delta_str(w.holder_change)
             ));
         }
-
-        // top pairs by liq
-        lines.push("── pairs ──".into());
-        for p in t.pairs.iter().take(6) {
+        lines.push("── top pairs ──".into());
+        for p in t.pairs.iter().take(5) {
             lines.push(format!(
-                "{:<8} liq {}  vol {}",
+                "{:<8} liq {} vol {}",
                 p.dex_id,
                 fmt_usd(p.liq_usd),
                 fmt_usd(p.vol_h24)
             ));
             lines.push(format!(
-                "  {}  {}  24h {}",
+                "  {} {}  {}",
                 short_addr(&p.pair_address, 4),
                 p.quote_symbol,
                 delta_str(p.change_h24)
             ));
         }
-
-        // bull inference tail
         if !self.snap.feed.is_empty() {
             lines.push("── inference ──".into());
-            for ev in self.snap.feed.iter().take(8) {
+            for ev in self.snap.feed.iter().take(6) {
                 let tm = clock_mmdd_hhmm(ev.created_at.as_deref());
-                let model: String = ev.model_id.chars().take(18).collect();
-                lines.push(format!("{tm}  {model:<18} {}", fmt_ansem(ev.cost)));
+                let model: String = ev.model_id.chars().take(16).collect();
+                lines.push(format!("{tm} {model:<16} {}", fmt_ansem(ev.cost)));
             }
-        }
-        if lines.len() <= 1 {
-            lines.push("no activity".into());
         }
         lines
     }
@@ -456,8 +420,8 @@ impl App {
     fn lines_market(&self) -> Vec<String> {
         let s = &self.snap;
         let t = &s.token;
-        let price_spark = sparkline(&s.closes(), 32);
-        let vol_spark = sparkline(&s.volumes(), 32);
+        let price_spark = sparkline(&s.closes(), 28);
+        let vol_spark = sparkline(&s.volumes(), 28);
         let p = t.primary_pair.as_ref();
         let vol24 = t
             .stats_24h
@@ -474,12 +438,10 @@ impl App {
         let sell_v = t.stats_24h.sell_volume;
         let bias = match (buy_v, sell_v) {
             (Some(b), Some(se)) if b + se > 0.0 => {
-                let pct = (b / (b + se)) * 100.0;
-                format!("buy bias {pct:.0}%")
+                format!("buy bias {:.0}%", (b / (b + se)) * 100.0)
             }
             _ => "buy bias —".into(),
         };
-
         vec![
             format!(
                 "ANSEM {}   24h {}",
@@ -492,44 +454,27 @@ impl App {
                 delta_str(t.stats_1h.price_change.or_else(|| p.and_then(|x| x.change_h1))),
                 delta_str(t.stats_6h.price_change.or_else(|| p.and_then(|x| x.change_h6)))
             ),
+            format!("vol  {}   liq {}", fmt_usd(vol24), fmt_usd(liq)),
+            format!("buy  {}   sell {}", fmt_usd(buy_v), fmt_usd(sell_v)),
             format!(
-                "vol 24h {}   liq {}",
-                fmt_usd(vol24),
-                fmt_usd(liq)
-            ),
-            format!(
-                "buy  {}   sell {}",
-                fmt_usd(buy_v),
-                fmt_usd(sell_v)
-            ),
-            format!(
-                "tx   {}B / {}S   traders {}",
+                "tx   {}B / {}S   tr {}",
                 fmt_int(t.stats_24h.buys.or_else(|| p.and_then(|x| x.buys_h24))),
                 fmt_int(t.stats_24h.sells.or_else(|| p.and_then(|x| x.sells_h24))),
                 fmt_int(t.stats_24h.traders)
             ),
             format!(
-                "hi/lo {} / {}",
+                "hi   {}  lo {}",
                 fmt_usd(s.ohlc_stat_f("high_24h")),
                 fmt_usd(s.ohlc_stat_f("low_24h"))
             ),
             format!("price {price_spark}"),
             format!("vol   {vol_spark}"),
-            format!(
-                "mcap {}  fdv {}",
-                fmt_usd(t.mcap),
-                fmt_usd(t.fdv)
-            ),
+            format!("mcap {}  fdv {}", fmt_usd(t.mcap), fmt_usd(t.fdv)),
             format!(
                 "{} · {}",
-                p.map(|x| format!("{} {}", x.dex_id, short_addr(&x.pair_address, 6)))
+                p.map(|x| format!("{} {}", x.dex_id, short_addr(&x.pair_address, 5)))
                     .unwrap_or_else(|| "pair —".into()),
                 bias
-            ),
-            format!(
-                "liq Δ 1h {}  24h {}",
-                delta_str(t.stats_1h.liquidity_change),
-                delta_str(t.stats_24h.liquidity_change)
             ),
         ]
     }
@@ -546,37 +491,40 @@ impl App {
                     .unwrap_or_else(|| "—".into()),
             ];
         }
-
         let top10 = t.top10_pct.or(t.top_holders_pct);
         let mut lines = vec![
             format!(
-                "{} holders · traders 24h {}",
+                "{} holders · tr 24h {}",
                 fmt_int(t.holder_count),
                 fmt_int(t.stats_24h.traders)
             ),
             format!(
-                "holders 1h {}  6h {}  24h {}",
+                "1h {}  6h {}  24h {}",
                 delta_str(t.stats_1h.holder_change),
                 delta_str(t.stats_6h.holder_change),
                 delta_str(t.stats_24h.holder_change)
             ),
             format!(
-                "top10 {:>5}  {}",
+                "top10 {:>5} {}",
                 top10.map(|p| format!("{p:.1}%")).unwrap_or_else(|| "—".into()),
-                bar(top10, 18)
+                bar(top10, 14)
             ),
             format!(
-                "11-20 {:>5}  {}",
-                t.top11_20_pct.map(|p| format!("{p:.1}%")).unwrap_or_else(|| "—".into()),
-                bar(t.top11_20_pct, 18)
+                "11-20 {:>5} {}",
+                t.top11_20_pct
+                    .map(|p| format!("{p:.1}%"))
+                    .unwrap_or_else(|| "—".into()),
+                bar(t.top11_20_pct, 14)
             ),
             format!(
-                "rest  {:>5}  {}",
-                t.rest_pct.map(|p| format!("{p:.1}%")).unwrap_or_else(|| "—".into()),
-                bar(t.rest_pct, 18)
+                "rest  {:>5} {}",
+                t.rest_pct
+                    .map(|p| format!("{p:.1}%"))
+                    .unwrap_or_else(|| "—".into()),
+                bar(t.rest_pct, 14)
             ),
             format!(
-                "dev hold {}   organic buyers 24h {}",
+                "dev {} · organic 24h {}",
                 t.dev_balance_pct
                     .map(|p| {
                         if p < 0.01 {
@@ -589,14 +537,13 @@ impl App {
                 fmt_int(t.stats_24h.organic_buyers)
             ),
             format!(
-                "circ {} · net buyers {}",
+                "circ {} · net {}",
                 fmt_compact(t.circ_supply),
                 fmt_int(t.stats_24h.net_buyers)
             ),
             "── top holders ──".into(),
         ];
-
-        for (i, th) in t.top_holders.iter().enumerate() {
+        for (i, th) in t.top_holders.iter().take(8).enumerate() {
             let pct = th
                 .pct
                 .map(|p| format!("{p:>5.2}%"))
@@ -607,21 +554,17 @@ impl App {
                 .unwrap_or_else(|| "—".into());
             let flag = if th.insider { " *" } else { "" };
             lines.push(format!(
-                "#{:<2} {pct}  {:>8}  {}{flag}",
+                "#{:<2} {pct} {:>9}  {}{flag}",
                 i + 1,
                 amt,
                 short_addr(&th.owner, 4)
             ));
         }
-
         if let Some(c) = &t.creator {
-            lines.push(format!("creator  {}", short_addr(c, 6)));
+            lines.push(format!("creator {}", short_addr(c, 5)));
         }
         if let Some(d) = &t.dev {
-            lines.push(format!("dev      {}", short_addr(d, 6)));
-        }
-        if let Some(n) = t.graph_insiders {
-            lines.push(format!("graph insiders detected  {n}"));
+            lines.push(format!("dev     {}", short_addr(d, 5)));
         }
         lines
     }
@@ -631,13 +574,15 @@ impl App {
         let ch = delta_str(self.snap.change_24h());
         let handle = self.feed_mode.label(&self.cfg);
         let holders = fmt_int(self.snap.token.holder_count);
-        let liq = fmt_usd(self.snap.token.liquidity.or_else(|| {
-            self.snap
-                .token
-                .primary_pair
-                .as_ref()
-                .and_then(|p| p.liq_usd)
-        }));
+        let liq = fmt_usd(
+            self.snap.token.liquidity.or_else(|| {
+                self.snap
+                    .token
+                    .primary_pair
+                    .as_ref()
+                    .and_then(|p| p.liq_usd)
+            }),
+        );
         format!(
             " BULLBOARD · ANSEM {price} · {ch} · holders {holders} · liq {liq} · @{handle} "
         )
@@ -647,11 +592,14 @@ impl App {
         let updated = ago(self.snap.fetched_at.as_deref());
         let pane = self.focus.pane().title();
         format!(
-            " q quit · r refresh · n feed({}) · tab focus · ↑↓/jk/pg scroll · mouse wheel · focus:{pane} · updated {updated} · bullboard v{} ",
-            self.feed_mode.as_str(),
-            env!("CARGO_PKG_VERSION")
+            " q quit · r refresh · n feed · tab · ↑↓ scroll · {}s · updated {} · focus:{} · bullboard v{} · matrix ",
+            REFRESH_DATA_SECS,
+            updated,
+            pane,
+            env!("CARGO_PKG_VERSION"),
         )
     }
+
 
     pub fn announce_title(&self) -> String {
         let last = self

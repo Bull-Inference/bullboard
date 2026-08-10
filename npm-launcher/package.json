@@ -1,0 +1,17 @@
+{
+  "name": "bullboard-cli",
+  "version": "0.1.0",
+  "description": "npm launcher for bullboard — Surfboard-style $ANSEM / @blknoiz06 terminal dashboard",
+  "bin": {
+    "bullboard": "bin/bullboard.js"
+  },
+  "keywords": ["bullinf", "ansem", "solana", "tui", "blknoiz", "terminal"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Bull-Inference/bullboard.git"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,110 @@
+/* Bull desk — ink / acid */
+
+Screen {
+    background: #0a0b09;
+    color: #c8d0b8;
+}
+
+#header {
+    height: 1;
+    background: #0a0b09;
+    color: #c8f542;
+    text-style: bold;
+    padding: 0 1;
+    dock: top;
+}
+
+#footer {
+    height: 1;
+    background: #0a0b09;
+    color: #6b6f64;
+    padding: 0 1;
+    dock: bottom;
+}
+
+.panel {
+    border: solid #2a2e24;
+    background: #121410;
+    padding: 0 1;
+    height: 1fr;
+}
+
+.panel-title {
+    color: #c8f542;
+    text-style: bold;
+    height: 1;
+}
+
+.panel-body {
+    color: #c8d0b8;
+    height: 1fr;
+}
+
+.muted {
+    color: #6b6f64;
+}
+
+.acid {
+    color: #c8f542;
+}
+
+.warn {
+    color: #e6b84d;
+}
+
+.bad {
+    color: #e35d5d;
+}
+
+.ok {
+    color: #c8f542;
+}
+
+#top-row {
+    height: 7;
+    layout: horizontal;
+}
+
+#top-row .panel {
+    width: 1fr;
+}
+
+#mid-row {
+    height: 1fr;
+    layout: horizontal;
+}
+
+#announce {
+    width: 3fr;
+}
+
+#mid-right {
+    width: 2fr;
+    layout: vertical;
+}
+
+#signals {
+    height: 1fr;
+}
+
+#activity {
+    height: 1fr;
+}
+
+#bottom-row {
+    height: 8;
+    layout: horizontal;
+}
+
+#bottom-row .panel {
+    width: 1fr;
+}
+
+TweetLine {
+    color: #7ddea0;
+    height: auto;
+}
+
+Static {
+    width: 100%;
+}

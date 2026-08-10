@@ -1,8 +1,8 @@
+/target/
+**/*.rs.bk
+.DS_Store
 __pycache__/
-*.py[cod]
+*.pyc
 .venv/
-dist/
 *.egg-info/
 .pytest_cache/
-.ruff_cache/
-.DS_Store

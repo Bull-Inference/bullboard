@@ -1,67 +1,82 @@
 # bullboard
 
-Surfboard-style terminal dashboard for **Bull.inf** — stalk **$ANSEM** and **@blknoiz06** from your shell.
+Surfboard-style **Rust TUI** for **Bull.inf** — stalk **$ANSEM** and **@blknoiz06** from your shell.
+
+Multi-pane dashboard with **scrollable sections** (ratatui). Tab-focus a pane, then `j/k` / arrows / mouse wheel to scroll.
 
 ```
 BULLBOARD · $ANSEM · @blknoiz06 · feed · activity
 ```
 
-Live panes: gate / treasury / stake fees / mcap · announce feed · signals · inference activity · ANSEM market · desk KPIs.
-
 ## Install
 
-### pipx (recommended)
+### Cargo (recommended)
 
 ```bash
-pipx install git+https://github.com/Bull-Inference/bullboard.git
-# or from a local clone:
-pipx install /path/to/bullboard
+cargo install --path /path/to/bullboard
+# or from git once published:
+# cargo install --git https://github.com/Bull-Inference/bullboard
 ```
 
-### pip (venv / editable)
+Binary: `bullboard` on your PATH (`~/.cargo/bin`).
+
+### From this repo
 
 ```bash
-pip install -e .
+cd bullboard
+cargo build --release
+cargo install --path .
 ```
 
-### npm (thin launcher — runs the Python CLI)
+### Legacy Python (pipx)
+
+The original Textual app lives in `legacy-python/` if you still want it:
 
 ```bash
-npm install -g bullboard-cli
-# or once published; for local:
-npm install -g ./npm-launcher
+pipx install ./legacy-python
 ```
 
 ## Run
 
 ```bash
 bullboard
+bullboard --once          # JSON smoke, no TUI
+bullboard --handle blknoiz06
 ```
 
-Keys: `q` quit · `r` refresh · `n` cycle X feed (`blknoiz06` / `bullinference` / both)
+### Keys
 
-Smoke (no TUI):
+| Key | Action |
+|-----|--------|
+| `q` / `Esc` | quit |
+| `r` | force refresh all |
+| `n` | cycle feed (`blknoiz06` → `bullinference` → both) |
+| `Tab` / `Shift+Tab` | focus next / prev pane |
+| `↑↓` / `j k` | scroll focused pane |
+| `PgUp` / `PgDn` | scroll faster |
+| `Home` | scroll to top |
+| `1`–`9` | jump focus to pane |
+| mouse wheel | scroll focused pane |
 
-```bash
-bullboard --once
-```
+Focused pane gets an **acid border** + scrollbar when content overflows.
 
 ## Env
 
-| Var | Default | Meaning |
-|-----|---------|---------|
-| `BULLBOARD_API_BASE` | `https://api.bullinf.fun` | Bull API |
-| `BULLBOARD_X_HANDLE` | `blknoiz06` | Primary X announce feed |
-| `BULLBOARD_X_HANDLE_ALT` | `bullinference` | Alt feed |
-| `BULLBOARD_REFRESH_SEC` | `15` | Data poll interval |
-| `BULLBOARD_FEED_REFRESH_SEC` | `60` | Tweet poll interval |
+| Var | Default |
+|-----|---------|
+| `BULLBOARD_API_BASE` | `https://api.bullinf.fun` |
+| `BULLBOARD_X_HANDLE` | `blknoiz06` |
+| `BULLBOARD_X_HANDLE_ALT` | `bullinference` |
+| `BULLBOARD_MINT` | ANSEM mint |
 
-## Data
+## Data (public, no keys)
 
-Public Bull.inf endpoints only (`/api/token-price`, `/api/stats`, `/api/markets/feed`, …) + Nitter RSS for X. No wallet. No auth.
+- Bull.inf: network, price, OHLC, stake, markets feed
+- Jupiter / Gecko / Rugcheck: holder count, distribution, top wallets
+- Nitter RSS: @blknoiz06 announce feed
 
 Mint: `9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump` · Desk: [bullinf.fun](https://bullinf.fun)
 
 ## Inspired by
 
-[Surfboard / MAXPANE](https://x.com/cryptokarlheinz/status/2086826710180286738) — same energy, Bull rails.
+[Surfboard / MAXPANE](https://x.com/cryptokarlheinz/status/2086826710180286738)

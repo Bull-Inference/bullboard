@@ -100,7 +100,7 @@ class BullboardApp(App[None]):
                 yield Panel("INFERENCE ACTIVITY", "activity-body", id="activity")
         with Horizontal(id="bottom-row"):
             yield Panel("ANSEM MARKET", "market-body")
-            yield Panel("BULL.INF DESK", "desk-body")
+            yield Panel("ANSEM HOLDERS", "holders-body")
         yield Static(self._footer_text(), id="footer")
 
     def on_mount(self) -> None:
@@ -282,16 +282,39 @@ class BullboardApp(App[None]):
         )
         self.query_one("#market-body", Static).update(market)
 
-        # DESK
-        act24 = stats.get("activity_24h") or {}
-        desk = (
-            f"requests     {fmt_compact(stats.get('requests'))}  (24h {fmt_compact(act24.get('requests'))})\n"
-            f"sellers      {fmt_compact(stats.get('active_sellers'))} active / {fmt_compact(stats.get('registered_sellers'))} reg\n"
-            f"models live  {fmt_compact(stats.get('live_models'))}   offers {fmt_compact(stats.get('open_offers'))}\n"
-            f"liquidity    {fmt_compact(stats.get('liquidity_remaining'))}\n"
-            f"gross        {fmt_ansem(stats.get('gross_revenue'))}  · savings ${fmt_compact(stats.get('savings_usd'))}"
-        )
-        self.query_one("#desk-body", Static).update(desk)
+        # HOLDERS ($ANSEM)
+        h = s.holders or {}
+        if not h:
+            holders_body = "holders unavailable\n" + (s.errors.get("holders") or "—")
+        else:
+            hc = h.get("holder_count")
+            hc_s = f"{hc:,}" if isinstance(hc, int) else fmt_compact(hc)
+            tops = h.get("top_holders") or []
+            top1 = tops[0] if tops else None
+            top2 = tops[1] if len(tops) > 1 else None
+
+            def _holder_line(rank: int, row: dict | None) -> str:
+                if not row:
+                    return f"#{rank}   —"
+                pct = row.get("pct")
+                pct_s = f"{float(pct):.1f}%" if pct is not None else "—"
+                who = short_addr(row.get("owner") or row.get("address"), 4)
+                return f"#{rank}  {pct_s:>6}  {who}"
+
+            top10 = h.get("top10_pct")
+            rest = h.get("rest_pct")
+            holders_body = (
+                f"holders  {hc_s:<10} 24h {delta_str(h.get('holder_change_24h'))}\n"
+                f"1h {delta_str(h.get('holder_change_1h'))}   "
+                f"6h {delta_str(h.get('holder_change_6h'))}\n"
+                f"top10    {fmt_compact(top10) + '%' if top10 is not None else '—':<8} "
+                f"rest {fmt_compact(rest) + '%' if rest is not None else '—'}\n"
+                f"circ     {fmt_compact(h.get('circ_supply'))}   "
+                f"traders 24h {fmt_compact(h.get('traders_24h'))}\n"
+                f"{_holder_line(1, top1)}\n"
+                f"{_holder_line(2, top2)}"
+            )
+        self.query_one("#holders-body", Static).update(holders_body)
 
         self._paint_announce()
         self.query_one("#header", Static).update(self._header_text())

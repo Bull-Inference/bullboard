@@ -69,6 +69,18 @@ async def _once(api_base: str | None, feed_mode: str) -> int:
         else None,
         "ohlc_stats": (snap.ohlc or {}).get("stats"),
         "feed_n": len((snap.feed or {}).get("feed") or []),
+        "holders": {
+            "holder_count": (snap.holders or {}).get("holder_count"),
+            "holder_change_24h": (snap.holders or {}).get("holder_change_24h"),
+            "top10_pct": (snap.holders or {}).get("top10_pct"),
+            "rest_pct": (snap.holders or {}).get("rest_pct"),
+            "traders_24h": (snap.holders or {}).get("traders_24h"),
+            "circ_supply": (snap.holders or {}).get("circ_supply"),
+            "top_holders": ((snap.holders or {}).get("top_holders") or [])[:3],
+            "sources": (snap.holders or {}).get("sources"),
+        }
+        if snap.holders
+        else None,
         "tweets": {
             "handle": tweets.get("handle"),
             "n": len(tweets.get("tweets") or []),
@@ -78,8 +90,8 @@ async def _once(api_base: str | None, feed_mode: str) -> int:
         "errors": snap.errors,
     }
     print(json.dumps(out, indent=2, default=str))
-    # success if we got a price or stats
-    if snap.price_usd() is not None or snap.stats:
+    # success if we got a price, holders, or stats
+    if snap.price_usd() is not None or snap.holders or snap.stats:
         return 0
     return 1
 

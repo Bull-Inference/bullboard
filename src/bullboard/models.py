@@ -17,6 +17,7 @@ class BoardSnapshot:
     stake: dict[str, Any] | None = None
     markets: list[dict[str, Any]] | None = None
     feed: dict[str, Any] | None = None
+    holders: dict[str, Any] | None = None
     tweets: dict[str, Any] | None = None
     errors: dict[str, str] = field(default_factory=dict)
     fetched_at: str | None = None
@@ -104,6 +105,22 @@ def signals_from_snapshot(snap: BoardSnapshot) -> list[tuple[str, str, str]]:
         sigs.append(("ok", "STAKE FEES", f"24h routed {fees if fees is not None else '—'} ANSEM"))
     else:
         sigs.append(("warn", "STAKE", "no stats"))
+
+    holders = snap.holders or {}
+    hc = holders.get("holder_count")
+    ch24 = holders.get("holder_change_24h")
+    top10 = holders.get("top10_pct")
+    if hc is not None:
+        detail = f"{hc:,}" if isinstance(hc, int) else str(hc)
+        if ch24 is not None:
+            detail += f" · 24h {ch24:+.2f}%"
+        status = "ok"
+        if top10 is not None and top10 >= 50:
+            status = "warn"
+            detail += f" · top10 {top10:.1f}%"
+        sigs.append((status, "HOLDERS", detail))
+    elif errors.get("holders"):
+        sigs.append(("warn", "HOLDERS", "unavailable"))
 
     for key, err in list(errors.items())[:4]:
         if err:

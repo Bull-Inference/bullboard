@@ -1,5 +1,7 @@
 use chrono::{DateTime, Local, Utc};
 
+// Utc used by age_from_ms
+
 const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 pub fn fmt_usd(x: Option<f64>) -> String {
@@ -158,4 +160,29 @@ pub fn rate_pct(x: Option<f64>) -> String {
             format!("{p:.1}%")
         }
     }
+}
+
+pub fn age_from_ms(ms: Option<u64>) -> String {
+    let Some(ms) = ms else {
+        return "—".into();
+    };
+    let secs = (Utc::now().timestamp_millis() as u64).saturating_sub(ms) / 1000;
+    if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
+}
+
+pub fn bar(pct: Option<f64>, width: usize) -> String {
+    let p = pct.unwrap_or(0.0).clamp(0.0, 100.0);
+    let filled = ((p / 100.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(width.saturating_sub(filled))
+    )
 }

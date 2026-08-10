@@ -38,15 +38,15 @@ impl PaneId {
 
     pub fn title(self) -> &'static str {
         match self {
-            PaneId::Gate => "BULL GATE",
-            PaneId::Treasury => "TREASURY / MINT",
-            PaneId::Stake => "STAKE / FEES",
-            PaneId::Mcap => "ANSEM MCAP",
+            PaneId::Gate => "PRICE / FLOW",
+            PaneId::Treasury => "PRIMARY LP",
+            PaneId::Stake => "AUDIT / RISK",
+            PaneId::Mcap => "ANSEM SUPPLY",
             PaneId::Announce => "ANNOUNCE FEED",
             PaneId::Signals => "SIGNALS",
-            PaneId::Activity => "INFERENCE ACTIVITY",
+            PaneId::Activity => "DEX + INFERENCE",
             PaneId::Market => "ANSEM MARKET",
-            PaneId::Holders => "ANSEM HOLDERS",
+            PaneId::Holders => "HOLDERS / DIST",
         }
     }
 

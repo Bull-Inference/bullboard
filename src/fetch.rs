@@ -1,5 +1,7 @@
 use crate::config::{Config, FeedMode, NITTER_BASES};
-use crate::model::{FeedItem, Holders, Snapshot, TopHolder, Tweet};
+use crate::model::{
+    DexPair, FeedItem, RiskFlag, Snapshot, Token, TopHolder, Tweet, WindowStats,
+};
 use anyhow::Result;
 use chrono::Utc;
 use quick_xml::events::Event;
@@ -59,6 +61,12 @@ fn json_u(v: &Value, key: &str) -> Option<u64> {
     })
 }
 
+fn json_str(v: &Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+}
+
 fn take_val(
     map: &mut HashMap<String, Result<Value, String>>,
     key: &str,
@@ -74,29 +82,38 @@ fn take_val(
     }
 }
 
-fn parse_holders(
-    mint: &str,
-    jup_raw: Result<Value, String>,
-    gecko_raw: Result<Value, String>,
-    rug_raw: Result<Value, String>,
-    errors: &mut HashMap<String, String>,
-) -> Holders {
-    let mut h = Holders::default();
+fn parse_window(v: Option<&Value>) -> WindowStats {
+    let Some(s) = v else {
+        return WindowStats::default();
+    };
+    WindowStats {
+        price_change: json_f(s, "priceChange"),
+        holder_change: json_f(s, "holderChange"),
+        liquidity_change: json_f(s, "liquidityChange"),
+        volume_change: json_f(s, "volumeChange"),
+        buy_volume: json_f(s, "buyVolume"),
+        sell_volume: json_f(s, "sellVolume"),
+        buys: json_u(s, "numBuys"),
+        sells: json_u(s, "numSells"),
+        traders: json_u(s, "numTraders"),
+        organic_buyers: json_u(s, "numOrganicBuyers"),
+        net_buyers: json_u(s, "numNetBuyers"),
+    }
+}
 
-    let jup_obj = match jup_raw {
+fn pick_jup(mint: &str, raw: Result<Value, String>, errors: &mut HashMap<String, String>) -> Option<Value> {
+    match raw {
         Ok(Value::Array(arr)) => {
-            let mut found = None;
             let mut first = None;
             for row in arr {
                 if first.is_none() {
                     first = Some(row.clone());
                 }
                 if row.get("id").and_then(|i| i.as_str()) == Some(mint) {
-                    found = Some(row);
-                    break;
+                    return Some(row);
                 }
             }
-            found.or(first)
+            first
         }
         Ok(v) if v.is_object() => Some(v),
         Ok(_) => None,
@@ -104,37 +121,149 @@ fn parse_holders(
             errors.insert("jupiter".into(), e);
             None
         }
+    }
+}
+
+fn parse_dex_pairs(raw: Result<Value, String>, errors: &mut HashMap<String, String>) -> Vec<DexPair> {
+    let v = match raw {
+        Ok(v) => v,
+        Err(e) => {
+            errors.insert("dexscreener".into(), e);
+            return Vec::new();
+        }
+    };
+    let mut pairs = Vec::new();
+    let arr = v
+        .get("pairs")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for p in arr {
+        let liq = p.get("liquidity").cloned().unwrap_or(Value::Null);
+        let vol = p.get("volume").cloned().unwrap_or(Value::Null);
+        let ch = p.get("priceChange").cloned().unwrap_or(Value::Null);
+        let tx = p.get("txns").cloned().unwrap_or(Value::Null);
+        let h24 = tx.get("h24").cloned().unwrap_or(Value::Null);
+        let quote = p
+            .pointer("/quoteToken/symbol")
+            .and_then(|s| s.as_str())
+            .unwrap_or("?")
+            .to_string();
+        pairs.push(DexPair {
+            dex_id: json_str(&p, "dexId").unwrap_or_else(|| "?".into()),
+            pair_address: json_str(&p, "pairAddress").unwrap_or_default(),
+            price_usd: json_f(&p, "priceUsd").or_else(|| {
+                p.get("priceUsd")
+                    .and_then(|x| x.as_str())
+                    .and_then(|s| s.parse().ok())
+            }),
+            change_m5: json_f(&ch, "m5"),
+            change_h1: json_f(&ch, "h1"),
+            change_h6: json_f(&ch, "h6"),
+            change_h24: json_f(&ch, "h24"),
+            vol_h24: json_f(&vol, "h24"),
+            vol_h1: json_f(&vol, "h1"),
+            liq_usd: json_f(&liq, "usd"),
+            liq_base: json_f(&liq, "base"),
+            liq_quote: json_f(&liq, "quote"),
+            quote_symbol: quote,
+            buys_h24: json_u(&h24, "buys"),
+            sells_h24: json_u(&h24, "sells"),
+            fdv: json_f(&p, "fdv"),
+            mcap: json_f(&p, "marketCap"),
+            pair_created_ms: json_u(&p, "pairCreatedAt"),
+        });
+    }
+    pairs.sort_by(|a, b| {
+        b.liq_usd
+            .partial_cmp(&a.liq_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    pairs
+}
+
+fn parse_token(
+    mint: &str,
+    jup_raw: Result<Value, String>,
+    gecko_raw: Result<Value, String>,
+    rug_raw: Result<Value, String>,
+    dex_raw: Result<Value, String>,
+    errors: &mut HashMap<String, String>,
+) -> Token {
+    let mut t = Token {
+        mint: mint.to_string(),
+        name: "The Black Bull".into(),
+        symbol: "ANSEM".into(),
+        ..Default::default()
     };
 
-    if let Some(ref j) = jup_obj {
-        h.holder_count = json_u(j, "holderCount");
-        h.circ_supply = json_f(j, "circSupply");
-        if let Some(s) = j.get("stats1h") {
-            h.holder_change_1h = json_f(s, "holderChange");
+    if let Some(j) = pick_jup(mint, jup_raw, errors) {
+        t.name = json_str(&j, "name").unwrap_or(t.name);
+        t.symbol = json_str(&j, "symbol").unwrap_or(t.symbol);
+        t.price_usd = json_f(&j, "usdPrice");
+        t.mcap = json_f(&j, "mcap");
+        t.fdv = json_f(&j, "fdv");
+        t.liquidity = json_f(&j, "liquidity");
+        t.circ_supply = json_f(&j, "circSupply");
+        t.total_supply = json_f(&j, "totalSupply");
+        t.holder_count = json_u(&j, "holderCount");
+        t.decimals = json_u(&j, "decimals").map(|d| d as u32);
+        t.launchpad = json_str(&j, "launchpad");
+        t.graduated_at = json_str(&j, "graduatedAt");
+        t.graduated_pool = json_str(&j, "graduatedPool");
+        t.dev = json_str(&j, "dev");
+        t.twitter = json_str(&j, "twitter");
+        t.website = json_str(&j, "website");
+        t.organic_score = json_f(&j, "organicScore");
+        t.organic_label = json_str(&j, "organicScoreLabel");
+        t.is_verified = j.get("isVerified").and_then(|v| v.as_bool());
+        if let Some(tags) = j.get("tags").and_then(|x| x.as_array()) {
+            t.tags = tags
+                .iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect();
         }
-        if let Some(s) = j.get("stats6h") {
-            h.holder_change_6h = json_f(s, "holderChange");
+        if let Some(audit) = j.get("audit") {
+            t.mint_auth_disabled = audit.get("mintAuthorityDisabled").and_then(|v| v.as_bool());
+            t.freeze_auth_disabled = audit
+                .get("freezeAuthorityDisabled")
+                .and_then(|v| v.as_bool());
+            t.top_holders_pct = json_f(audit, "topHoldersPercentage");
+            t.dev_balance_pct = json_f(audit, "devBalancePercentage");
         }
-        if let Some(s) = j.get("stats24h") {
-            h.holder_change_24h = json_f(s, "holderChange");
-            h.traders_24h = json_u(s, "numTraders");
-        }
+        t.stats_5m = parse_window(j.get("stats5m"));
+        t.stats_1h = parse_window(j.get("stats1h"));
+        t.stats_6h = parse_window(j.get("stats6h"));
+        t.stats_24h = parse_window(j.get("stats24h"));
     }
 
     match gecko_raw {
         Ok(g) => {
             if let Some(attrs) = g.pointer("/data/attributes") {
-                if h.circ_supply.is_none() {
-                    h.circ_supply = json_f(attrs, "normalized_total_supply");
+                if t.circ_supply.is_none() {
+                    t.circ_supply = json_f(attrs, "normalized_total_supply");
                 }
                 if let Some(holders) = attrs.get("holders") {
-                    if h.holder_count.is_none() {
-                        h.holder_count = json_u(holders, "count");
+                    if t.holder_count.is_none() {
+                        t.holder_count = json_u(holders, "count");
                     }
                     if let Some(dist) = holders.get("distribution_percentage") {
-                        h.top10_pct = json_f(dist, "top_10");
-                        h.rest_pct = json_f(dist, "rest");
+                        t.top10_pct = json_f(dist, "top_10");
+                        t.top11_20_pct = json_f(dist, "11_20");
+                        t.top21_40_pct = json_f(dist, "21_40");
+                        t.rest_pct = json_f(dist, "rest");
                     }
+                }
+                if t.mint_auth_disabled.is_none() {
+                    let ma = attrs.get("mint_authority").and_then(|v| v.as_str());
+                    t.mint_auth_disabled = ma.map(|s| s == "no" || s == "disabled");
+                }
+                if t.freeze_auth_disabled.is_none() {
+                    let fa = attrs.get("freeze_authority").and_then(|v| v.as_str());
+                    t.freeze_auth_disabled = fa.map(|s| s == "no" || s == "disabled");
+                }
+                if t.dev.is_none() {
+                    t.dev = json_str(attrs, "developer_address");
                 }
             }
         }
@@ -145,20 +274,40 @@ fn parse_holders(
 
     match rug_raw {
         Ok(r) => {
-            if h.holder_count.is_none() {
-                h.holder_count = json_u(&r, "totalHolders");
+            if t.holder_count.is_none() {
+                t.holder_count = json_u(&r, "totalHolders");
+            }
+            t.rug_score = json_f(&r, "score_normalised");
+            t.lp_locked_pct = json_f(&r, "lpLockedPct");
+            t.total_market_liq = json_f(&r, "totalMarketLiquidity");
+            t.graph_insiders = json_u(&r, "graphInsidersDetected");
+            t.rugged = r.get("rugged").and_then(|v| v.as_bool());
+            t.creator = json_str(&r, "creator");
+            if let Some(m) = r.get("markets").and_then(|a| a.as_array()) {
+                t.markets_n = Some(m.len() as u64);
+            }
+            if let Some(risks) = r.get("risks").and_then(|a| a.as_array()) {
+                for risk in risks.iter().take(6) {
+                    t.risks.push(RiskFlag {
+                        name: json_str(risk, "name").unwrap_or_default(),
+                        level: json_str(risk, "level").unwrap_or_default(),
+                        value: json_str(risk, "value").unwrap_or_default(),
+                    });
+                }
             }
             if let Some(arr) = r.get("topHolders").and_then(|a| a.as_array()) {
-                for th in arr.iter().take(12) {
+                for th in arr.iter().take(15) {
                     let owner = th
                         .get("owner")
                         .or_else(|| th.get("address"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    h.top_holders.push(TopHolder {
+                    t.top_holders.push(TopHolder {
                         owner,
                         pct: json_f(th, "pct"),
+                        ui_amount: json_f(th, "uiAmount"),
+                        insider: th.get("insider").and_then(|v| v.as_bool()).unwrap_or(false),
                     });
                 }
             }
@@ -168,7 +317,31 @@ fn parse_holders(
         }
     }
 
-    h
+    t.pairs = parse_dex_pairs(dex_raw, errors);
+    t.primary_pair = t.pairs.first().cloned();
+
+    // fill price/mcap from primary pair if missing
+    if let Some(ref p) = t.primary_pair {
+        if t.price_usd.is_none() {
+            t.price_usd = p.price_usd;
+        }
+        if t.mcap.is_none() {
+            t.mcap = p.mcap;
+        }
+        if t.fdv.is_none() {
+            t.fdv = p.fdv;
+        }
+        if t.liquidity.is_none() {
+            t.liquidity = p.liq_usd;
+        }
+    }
+
+    // prefer gecko top10 if jupiter audit missing distribution
+    if t.top10_pct.is_none() {
+        t.top10_pct = t.top_holders_pct;
+    }
+
+    t
 }
 
 pub async fn fetch_snapshot(client: &Client, cfg: &Config) -> Snapshot {
@@ -202,6 +375,10 @@ pub async fn fetch_snapshot(client: &Client, cfg: &Config) -> Snapshot {
         spawn(
             "rugcheck",
             format!("https://api.rugcheck.xyz/v1/tokens/{mint}/report"),
+        ),
+        spawn(
+            "dex",
+            format!("https://api.dexscreener.com/latest/dex/tokens/{mint}"),
         ),
     ];
 
@@ -248,7 +425,8 @@ pub async fn fetch_snapshot(client: &Client, cfg: &Config) -> Snapshot {
     let jup = map.remove("jupiter").unwrap_or(Err("missing".into()));
     let gecko = map.remove("gecko").unwrap_or(Err("missing".into()));
     let rug = map.remove("rugcheck").unwrap_or(Err("missing".into()));
-    snap.holders = parse_holders(&mint, jup, gecko, rug, &mut errors);
+    let dex = map.remove("dex").unwrap_or(Err("missing".into()));
+    snap.token = parse_token(&mint, jup, gecko, rug, dex, &mut errors);
     snap.errors = errors;
     snap.fetched_at = Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
     snap
@@ -416,17 +594,30 @@ pub async fn once_json(cfg: &Config) -> Result<String> {
     let (tweets, terr) = fetch_announce(&client, cfg, FeedMode::Primary, 12).await;
     snap.tweets = tweets;
     snap.tweet_error = terr;
+    let t = &snap.token;
 
     let out = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "fetched_at": snap.fetched_at,
         "price_usd": snap.price_usd(),
         "change_24h": snap.change_24h(),
-        "holders": {
-            "holder_count": snap.holders.holder_count,
-            "holder_change_24h": snap.holders.holder_change_24h,
-            "top10_pct": snap.holders.top10_pct,
-            "traders_24h": snap.holders.traders_24h,
+        "token": {
+            "holders": t.holder_count,
+            "holder_change_24h": t.stats_24h.holder_change,
+            "mcap": t.mcap,
+            "liquidity": t.liquidity,
+            "vol_24h": t.stats_24h.buy_volume.zip(t.stats_24h.sell_volume).map(|(b,s)| b+s)
+                .or_else(|| t.primary_pair.as_ref().and_then(|p| p.vol_h24)),
+            "buys_24h": t.stats_24h.buys,
+            "sells_24h": t.stats_24h.sells,
+            "traders_24h": t.stats_24h.traders,
+            "top10_pct": t.top10_pct,
+            "mint_auth_disabled": t.mint_auth_disabled,
+            "freeze_auth_disabled": t.freeze_auth_disabled,
+            "pairs": t.pairs.len(),
+            "primary_dex": t.primary_pair.as_ref().map(|p| &p.dex_id),
+            "organic_score": t.organic_score,
+            "rug_score": t.rug_score,
         },
         "feed_n": snap.feed.len(),
         "tweets_n": snap.tweets.len(),

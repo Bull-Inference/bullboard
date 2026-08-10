@@ -1,8 +1,8 @@
 use crate::config::{Config, FeedMode, REFRESH_DATA_SECS, REFRESH_FEED_SECS};
 use crate::fetch::{fetch_announce, fetch_snapshot, http_client};
 use crate::format::{
-    ago, clock_mmdd_hhmm, delta_str, fmt_ansem, fmt_compact, fmt_int, fmt_usd, rate_pct, short_addr,
-    sparkline,
+    age_from_ms, ago, bar, clock_mmdd_hhmm, delta_str, fmt_ansem, fmt_compact, fmt_int, fmt_usd,
+    short_addr, sparkline,
 };
 use crate::model::Snapshot;
 use crate::ui::{self, Focus, PaneId, NUM_PANES};
@@ -96,10 +96,10 @@ impl App {
 
     pub fn lines_for(&self, id: PaneId) -> Vec<String> {
         match id {
-            PaneId::Gate => self.lines_gate(),
-            PaneId::Treasury => self.lines_treasury(),
-            PaneId::Stake => self.lines_stake(),
-            PaneId::Mcap => self.lines_mcap(),
+            PaneId::Gate => self.lines_price_flow(),
+            PaneId::Treasury => self.lines_primary_lp(),
+            PaneId::Stake => self.lines_audit(),
+            PaneId::Mcap => self.lines_supply(),
             PaneId::Announce => self.lines_announce(),
             PaneId::Signals => self.lines_signals(),
             PaneId::Activity => self.lines_activity(),
@@ -108,99 +108,178 @@ impl App {
         }
     }
 
-    fn lines_gate(&self) -> Vec<String> {
-        let s = &self.snap;
-        let min_w = s
-            .net_f("min_wallet_ansem")
-            .or_else(|| s.cfg_f("min_wallet_ansem"));
-        let onchain = s
-            .net_bool("per_call_onchain")
-            .or_else(|| s.config.get("per_call_onchain").and_then(|v| v.as_bool()))
-            .unwrap_or(false);
-        let ready = s.net_bool("solana_ready").unwrap_or(false);
+    fn lines_price_flow(&self) -> Vec<String> {
+        let t = &self.snap.token;
+        let s24 = &t.stats_24h;
+        let s1 = &t.stats_1h;
+        let s5 = &t.stats_5m;
+        let vol24 = s24
+            .buy_volume
+            .zip(s24.sell_volume)
+            .map(|(b, s)| b + s)
+            .or_else(|| t.primary_pair.as_ref().and_then(|p| p.vol_h24));
         vec![
+            format!("ANSEM     {}", fmt_usd(self.snap.price_usd())),
             format!(
-                "min wallet   {} $ANSEM",
-                min_w.map(|v| format!("{v}")).unwrap_or_else(|| "—".into())
+                "5m {}  1h {}",
+                delta_str(s5.price_change.or_else(|| t.primary_pair.as_ref().and_then(|p| p.change_m5))),
+                delta_str(s1.price_change.or_else(|| t.primary_pair.as_ref().and_then(|p| p.change_h1)))
             ),
-            format!("per-call     {}", if onchain { "ON" } else { "off" }),
-            format!("solana       {}", if ready { "READY" } else { "DOWN" }),
-            format!("cluster      {}", s.net_str("cluster").unwrap_or("—")),
             format!(
-                "mode         {}",
-                s.net_str("transfer_mode").unwrap_or("—")
+                "6h {}  24h {}",
+                delta_str(t.stats_6h.price_change.or_else(|| t.primary_pair.as_ref().and_then(|p| p.change_h6))),
+                delta_str(self.snap.change_24h())
+            ),
+            format!("vol 24h   {}", fmt_usd(vol24)),
+            format!(
+                "traders   {}  net buyers {}",
+                fmt_int(s24.traders),
+                fmt_int(s24.net_buyers)
+            ),
+            format!(
+                "buys/sell {} / {}",
+                fmt_int(s24.buys),
+                fmt_int(s24.sells)
             ),
         ]
     }
 
-    fn lines_treasury(&self) -> Vec<String> {
-        let s = &self.snap;
-        let treasury = s
-            .net_str("treasury")
-            .or_else(|| s.net_str("settlement_authority"))
-            .unwrap_or("");
-        let mint = s.net_str("mint").unwrap_or("—");
+    fn lines_primary_lp(&self) -> Vec<String> {
+        let t = &self.snap.token;
+        let Some(p) = t.primary_pair.as_ref() else {
+            return vec![
+                "no pair data".into(),
+                format!("mint {}", short_addr(&t.mint, 6)),
+            ];
+        };
+        let total_liq: f64 = t.pairs.iter().filter_map(|x| x.liq_usd).sum();
         vec![
-            format!("treasury  {}", short_addr(treasury, 6)),
-            format!("mint      {}", short_addr(mint, 6)),
+            format!("{}  {}", p.dex_id.to_uppercase(), short_addr(&p.pair_address, 6)),
             format!(
-                "token     {}",
-                s.net_str("token_name").unwrap_or("The Black Bull")
+                "liq       {}",
+                fmt_usd(p.liq_usd)
             ),
             format!(
-                "symbol    {}",
-                s.net_str("token_symbol").unwrap_or("$ANSEM")
+                "base      {} ANSEM",
+                fmt_compact(p.liq_base)
             ),
             format!(
-                "decimals  {}",
-                s.net_f("decimals")
-                    .map(|d| format!("{d:.0}"))
+                "quote     {} {}",
+                fmt_compact(p.liq_quote),
+                p.quote_symbol
+            ),
+            format!(
+                "age       {}   pairs {}",
+                age_from_ms(p.pair_created_ms),
+                t.pairs.len()
+            ),
+            format!("all liq   {}", fmt_usd(Some(total_liq).filter(|v| *v > 0.0).or(t.liquidity))),
+            format!("24h vol   {}", fmt_usd(p.vol_h24)),
+            format!(
+                "tx 24h    {}B / {}S",
+                fmt_int(p.buys_h24),
+                fmt_int(p.sells_h24)
+            ),
+        ]
+    }
+
+    fn lines_audit(&self) -> Vec<String> {
+        let t = &self.snap.token;
+        let mint_ok = t.mint_auth_disabled.unwrap_or(false);
+        let freeze_ok = t.freeze_auth_disabled.unwrap_or(false);
+        let mut lines = vec![
+            format!(
+                "mint auth  {}",
+                if mint_ok { "DISABLED ✓" } else { "ENABLED ⚠" }
+            ),
+            format!(
+                "freeze     {}",
+                if freeze_ok { "DISABLED ✓" } else { "ENABLED ⚠" }
+            ),
+            format!(
+                "rug score  {}",
+                t.rug_score
+                    .map(|s| format!("{s:.0}/100"))
                     .unwrap_or_else(|| "—".into())
             ),
-        ]
+            format!(
+                "organic    {}",
+                t.organic_score
+                    .map(|s| format!(
+                        "{s:.1} {}",
+                        t.organic_label.as_deref().unwrap_or("")
+                    ))
+                    .unwrap_or_else(|| "—".into())
+            ),
+            format!(
+                "lp locked  {}",
+                t.lp_locked_pct
+                    .map(|p| format!("{p:.1}%"))
+                    .unwrap_or_else(|| "n/a".into())
+            ),
+            format!(
+                "insiders   {}   markets {}",
+                fmt_int(t.graph_insiders),
+                fmt_int(t.markets_n)
+            ),
+            format!(
+                "verified   {}   rugged {}",
+                match t.is_verified {
+                    Some(true) => "yes",
+                    Some(false) => "no",
+                    None => "—",
+                },
+                match t.rugged {
+                    Some(true) => "YES",
+                    Some(false) => "no",
+                    None => "—",
+                }
+            ),
+        ];
+        for r in t.risks.iter().take(4) {
+            let val = if r.value.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", r.value)
+            };
+            lines.push(format!("· {} [{}]{}", r.name, r.level, val));
+        }
+        if let Some(dev) = &t.dev {
+            lines.push(format!("dev {}", short_addr(dev, 4)));
+        }
+        lines
     }
 
-    fn lines_stake(&self) -> Vec<String> {
-        let s = &self.snap;
-        let fee = s.stake_f("platform_fee").or_else(|| s.cfg_f("platform_fee"));
-        let staker = s
-            .stake_f("staker_fee_rate")
-            .or_else(|| s.cfg_f("staker_fee_rate"));
-        let buyback = s
-            .stake_f("buyback_fee_rate")
-            .or_else(|| s.cfg_f("buyback_fee_rate"));
+    fn lines_supply(&self) -> Vec<String> {
+        let t = &self.snap.token;
+        let circ = t.circ_supply;
+        let total = t.total_supply.or(circ);
         vec![
-            format!("platform   {}", rate_pct(fee)),
-            format!("staker     {}", rate_pct(staker)),
-            format!("buyback    {}", rate_pct(buyback)),
+            format!("holders   {}", fmt_int(t.holder_count)),
             format!(
-                "routed 24h {}",
-                fmt_ansem(s.stake_f("fees_routed_24h_ansem"))
+                "24h Δ      {}",
+                delta_str(t.stats_24h.holder_change)
             ),
-            format!("pool       {}", fmt_ansem(s.stake_f("pool_pending_ansem"))),
-        ]
-    }
-
-    fn lines_mcap(&self) -> Vec<String> {
-        let s = &self.snap;
-        let src = s
-            .price
-            .get("source")
-            .and_then(|v| v.as_str())
-            .or_else(|| s.ohlc.pointer("/stats/source").and_then(|v| v.as_str()))
-            .unwrap_or("—");
-        vec![
-            format!("price   {}", fmt_usd(s.price_usd())),
-            format!("24h     {}", delta_str(s.change_24h())),
+            format!("circ      {}", fmt_compact(circ)),
+            format!("total     {}", fmt_compact(total)),
+            format!("mcap      {}", fmt_usd(t.mcap.or_else(|| self.snap.ohlc_stat_f("market_cap")))),
+            format!("fdv       {}", fmt_usd(t.fdv.or_else(|| self.snap.ohlc_stat_f("fdv")))),
             format!(
-                "mcap    {}",
-                fmt_usd(
-                    s.ohlc_stat_f("market_cap")
-                        .or_else(|| s.ohlc_stat_f("fdv"))
-                )
+                "launch    {} {}",
+                t.launchpad.as_deref().unwrap_or("—"),
+                t.graduated_at
+                    .as_deref()
+                    .map(|s| &s[..10.min(s.len())])
+                    .unwrap_or("")
             ),
-            format!("fdv     {}", fmt_usd(s.ohlc_stat_f("fdv"))),
-            format!("src     {src}"),
+            format!(
+                "tags      {}",
+                if t.tags.is_empty() {
+                    "—".into()
+                } else {
+                    t.tags.iter().take(4).cloned().collect::<Vec<_>>().join(",")
+                }
+            ),
         ]
     }
 
@@ -226,8 +305,8 @@ impl App {
                     String::new()
                 };
                 let mut text = t.text.replace('\n', " ");
-                if text.chars().count() > 140 {
-                    text = text.chars().take(137).collect::<String>() + "…";
+                if text.chars().count() > 160 {
+                    text = text.chars().take(157).collect::<String>() + "…";
                 }
                 format!("{when} POST  {prefix}{text}")
             })
@@ -235,188 +314,333 @@ impl App {
     }
 
     fn lines_signals(&self) -> Vec<String> {
-        let s = &self.snap;
+        let t = &self.snap.token;
         let mut lines = Vec::new();
 
-        let ready = s.net_bool("solana_ready").unwrap_or(false);
+        let mint_ok = t.mint_auth_disabled.unwrap_or(false);
         lines.push(format!(
-            "{} SOLANA       {}",
+            "{} MINT AUTH    {}",
+            if mint_ok { "●" } else { "○" },
+            if mint_ok { "disabled · safe" } else { "still enabled" }
+        ));
+        let freeze_ok = t.freeze_auth_disabled.unwrap_or(false);
+        lines.push(format!(
+            "{} FREEZE AUTH  {}",
+            if freeze_ok { "●" } else { "○" },
+            if freeze_ok { "disabled · safe" } else { "still enabled" }
+        ));
+
+        let liq = t.liquidity.or_else(|| t.primary_pair.as_ref().and_then(|p| p.liq_usd));
+        match liq {
+            Some(v) if v >= 500_000.0 => lines.push(format!("● LIQUIDITY    {} deep", fmt_usd(Some(v)))),
+            Some(v) if v >= 50_000.0 => lines.push(format!("◐ LIQUIDITY    {} thin", fmt_usd(Some(v)))),
+            Some(v) => lines.push(format!("○ LIQUIDITY    {} low", fmt_usd(Some(v)))),
+            None => lines.push("○ LIQUIDITY    no data".into()),
+        }
+
+        match t.stats_24h.holder_change {
+            Some(c) if c > 0.0 => lines.push(format!("● HOLDERS 24h  {} growing", delta_str(Some(c)))),
+            Some(c) if c < 0.0 => lines.push(format!("◐ HOLDERS 24h  {} shrinking", delta_str(Some(c)))),
+            Some(_) => lines.push("◐ HOLDERS 24h  flat".into()),
+            None => lines.push("◐ HOLDERS 24h  no data".into()),
+        }
+
+        match t.top10_pct.or(t.top_holders_pct) {
+            Some(p) if p >= 50.0 => lines.push(format!("◐ TOP10 CONC   {p:.1}% concentrated")),
+            Some(p) => lines.push(format!("● TOP10 CONC   {p:.1}% ok")),
+            None => lines.push("◐ TOP10 CONC   —".into()),
+        }
+
+        if let Some(p) = t.lp_locked_pct {
+            if p >= 50.0 {
+                lines.push(format!("● LP LOCKED    {p:.1}%"));
+            } else {
+                lines.push(format!("◐ LP LOCKED    {p:.1}%"));
+            }
+        } else {
+            lines.push("◐ LP LOCKED    n/a".into());
+        }
+
+        match t.rugged {
+            Some(false) => lines.push("● RUG FLAG     clean".into()),
+            Some(true) => lines.push("○ RUG FLAG     RAGGED".into()),
+            None => {}
+        }
+
+        let ready = self.snap.net_bool("solana_ready").unwrap_or(false);
+        lines.push(format!(
+            "{} SOLANA RPC   {}",
             if ready { "●" } else { "○" },
-            if ready {
-                "ready · on-chain settle"
-            } else {
-                "not ready"
-            }
+            if ready { "ready" } else { "down" }
         ));
 
-        let transfer = s.net_str("transfer_mode").unwrap_or("unknown");
-        lines.push(format!(
-            "{} TRANSFER     {transfer}",
-            if transfer == "solana" { "●" } else { "◐" }
-        ));
-
-        if s.price_usd().is_some() {
-            let src = s
-                .price
-                .get("source")
-                .and_then(|v| v.as_str())
-                .unwrap_or("live");
-            lines.push(format!("● PRICE        {src} feed"));
-        } else {
-            lines.push("○ PRICE        no quote".into());
+        if let Some(ch) = self.snap.change_24h() {
+            lines.push(format!("● PRICE 24h    {}", delta_str(Some(ch))));
         }
 
-        let models = s.stats_u("live_models").unwrap_or(0);
-        let liq = s.stats_f("liquidity_remaining");
-        if models > 0 {
+        for r in t.risks.iter().take(3) {
+            let mark = if r.level == "danger" { "○" } else { "◐" };
+            lines.push(format!("{mark} RISK         {} {}", r.name, r.value));
+        }
+
+        for (k, e) in self.snap.errors.iter().take(3) {
             lines.push(format!(
-                "● MARKETS      {models} models · liq {}",
-                fmt_compact(liq)
+                "○ {}  {}",
+                k.to_uppercase(),
+                e.chars().take(36).collect::<String>()
             ));
-        } else {
-            lines.push("◐ MARKETS      empty board".into());
-        }
-
-        let act = s
-            .stats
-            .pointer("/activity_24h/requests")
-            .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)));
-        match act {
-            Some(n) if n > 0 => lines.push(format!("● ACTIVITY 24h {n} requests")),
-            Some(_) => lines.push("◐ ACTIVITY 24h quiet".into()),
-            None => lines.push("◐ ACTIVITY 24h no data".into()),
-        }
-
-        if let Some(hc) = s.holders.holder_count {
-            let mut detail = fmt_int(Some(hc));
-            if let Some(ch) = s.holders.holder_change_24h {
-                detail.push_str(&format!(" · 24h {ch:+.2}%"));
-            }
-            if let Some(t10) = s.holders.top10_pct {
-                if t10 >= 50.0 {
-                    detail.push_str(&format!(" · top10 {t10:.1}%"));
-                    lines.push(format!("◐ HOLDERS      {detail}"));
-                } else {
-                    lines.push(format!("● HOLDERS      {detail}"));
-                }
-            } else {
-                lines.push(format!("● HOLDERS      {detail}"));
-            }
-        }
-
-        for (k, e) in s.errors.iter().take(4) {
-            lines.push(format!("○ {}  {}", k.to_uppercase(), &e.chars().take(40).collect::<String>()));
         }
         lines
     }
 
     fn lines_activity(&self) -> Vec<String> {
-        let s = &self.snap;
-        if s.feed.is_empty() {
-            return vec!["no inference yet".into()];
+        let t = &self.snap.token;
+        let mut lines = Vec::new();
+
+        // DEX flow windows
+        lines.push("── dex flow ──".into());
+        for (label, w) in [
+            ("5m", &t.stats_5m),
+            ("1h", &t.stats_1h),
+            ("6h", &t.stats_6h),
+            ("24h", &t.stats_24h),
+        ] {
+            let buy = w.buy_volume;
+            let sell = w.sell_volume;
+            lines.push(format!(
+                "{label:<3} B {}  S {}  tr {}",
+                fmt_usd(buy),
+                fmt_usd(sell),
+                fmt_int(w.traders)
+            ));
+            lines.push(format!(
+                "    {}B/{}S  holders {}",
+                fmt_int(w.buys),
+                fmt_int(w.sells),
+                delta_str(w.holder_change)
+            ));
         }
-        s.feed
-            .iter()
-            .map(|ev| {
-                let t = clock_mmdd_hhmm(ev.created_at.as_deref());
-                let model: String = ev.model_id.chars().take(22).collect();
-                format!("{t}  {model:<22} {}", fmt_ansem(ev.cost))
-            })
-            .collect()
+
+        // top pairs by liq
+        lines.push("── pairs ──".into());
+        for p in t.pairs.iter().take(6) {
+            lines.push(format!(
+                "{:<8} liq {}  vol {}",
+                p.dex_id,
+                fmt_usd(p.liq_usd),
+                fmt_usd(p.vol_h24)
+            ));
+            lines.push(format!(
+                "  {}  {}  24h {}",
+                short_addr(&p.pair_address, 4),
+                p.quote_symbol,
+                delta_str(p.change_h24)
+            ));
+        }
+
+        // bull inference tail
+        if !self.snap.feed.is_empty() {
+            lines.push("── inference ──".into());
+            for ev in self.snap.feed.iter().take(8) {
+                let tm = clock_mmdd_hhmm(ev.created_at.as_deref());
+                let model: String = ev.model_id.chars().take(18).collect();
+                lines.push(format!("{tm}  {model:<18} {}", fmt_ansem(ev.cost)));
+            }
+        }
+        if lines.len() <= 1 {
+            lines.push("no activity".into());
+        }
+        lines
     }
 
     fn lines_market(&self) -> Vec<String> {
         let s = &self.snap;
-        let spark = sparkline(&s.closes(), 28);
-        let pair = s
-            .ohlc
-            .pointer("/stats/pair_address")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let t = &s.token;
+        let price_spark = sparkline(&s.closes(), 32);
+        let vol_spark = sparkline(&s.volumes(), 32);
+        let p = t.primary_pair.as_ref();
+        let vol24 = t
+            .stats_24h
+            .buy_volume
+            .zip(t.stats_24h.sell_volume)
+            .map(|(b, se)| b + se)
+            .or_else(|| p.and_then(|x| x.vol_h24))
+            .or_else(|| s.ohlc_stat_f("volume_24h"));
+        let liq = t
+            .liquidity
+            .or_else(|| p.and_then(|x| x.liq_usd))
+            .or_else(|| s.ohlc_stat_f("liquidity_usd"));
+        let buy_v = t.stats_24h.buy_volume;
+        let sell_v = t.stats_24h.sell_volume;
+        let bias = match (buy_v, sell_v) {
+            (Some(b), Some(se)) if b + se > 0.0 => {
+                let pct = (b / (b + se)) * 100.0;
+                format!("buy bias {pct:.0}%")
+            }
+            _ => "buy bias —".into(),
+        };
+
         vec![
             format!(
-                "price  {}   24h {}",
+                "ANSEM {}   24h {}",
                 fmt_usd(s.price_usd()),
                 delta_str(s.change_24h())
             ),
             format!(
-                "vol    {}   liq {}",
-                fmt_usd(s.ohlc_stat_f("volume_24h")),
-                fmt_usd(s.ohlc_stat_f("liquidity_usd"))
+                "5m {}  1h {}  6h {}",
+                delta_str(t.stats_5m.price_change.or_else(|| p.and_then(|x| x.change_m5))),
+                delta_str(t.stats_1h.price_change.or_else(|| p.and_then(|x| x.change_h1))),
+                delta_str(t.stats_6h.price_change.or_else(|| p.and_then(|x| x.change_h6)))
             ),
             format!(
-                "hi/lo  {} / {}",
+                "vol 24h {}   liq {}",
+                fmt_usd(vol24),
+                fmt_usd(liq)
+            ),
+            format!(
+                "buy  {}   sell {}",
+                fmt_usd(buy_v),
+                fmt_usd(sell_v)
+            ),
+            format!(
+                "tx   {}B / {}S   traders {}",
+                fmt_int(t.stats_24h.buys.or_else(|| p.and_then(|x| x.buys_h24))),
+                fmt_int(t.stats_24h.sells.or_else(|| p.and_then(|x| x.sells_h24))),
+                fmt_int(t.stats_24h.traders)
+            ),
+            format!(
+                "hi/lo {} / {}",
                 fmt_usd(s.ohlc_stat_f("high_24h")),
                 fmt_usd(s.ohlc_stat_f("low_24h"))
             ),
-            spark,
-            format!("pair   {}", short_addr(pair, 6)),
+            format!("price {price_spark}"),
+            format!("vol   {vol_spark}"),
+            format!(
+                "mcap {}  fdv {}",
+                fmt_usd(t.mcap),
+                fmt_usd(t.fdv)
+            ),
+            format!(
+                "{} · {}",
+                p.map(|x| format!("{} {}", x.dex_id, short_addr(&x.pair_address, 6)))
+                    .unwrap_or_else(|| "pair —".into()),
+                bias
+            ),
+            format!(
+                "liq Δ 1h {}  24h {}",
+                delta_str(t.stats_1h.liquidity_change),
+                delta_str(t.stats_24h.liquidity_change)
+            ),
         ]
     }
 
     fn lines_holders(&self) -> Vec<String> {
-        let h = &self.snap.holders;
-        if h.holder_count.is_none() && h.top_holders.is_empty() {
-            let err = self
-                .snap
-                .errors
-                .get("jupiter")
-                .or_else(|| self.snap.errors.get("gecko"))
-                .cloned()
-                .unwrap_or_else(|| "—".into());
-            return vec!["holders unavailable".into(), err];
+        let t = &self.snap.token;
+        if t.holder_count.is_none() && t.top_holders.is_empty() {
+            return vec![
+                "holders unavailable".into(),
+                self.snap
+                    .errors
+                    .get("jupiter")
+                    .cloned()
+                    .unwrap_or_else(|| "—".into()),
+            ];
         }
 
+        let top10 = t.top10_pct.or(t.top_holders_pct);
         let mut lines = vec![
             format!(
-                "holders  {}   24h {}",
-                fmt_int(h.holder_count),
-                delta_str(h.holder_change_24h)
+                "{} holders · traders 24h {}",
+                fmt_int(t.holder_count),
+                fmt_int(t.stats_24h.traders)
             ),
             format!(
-                "1h {}   6h {}",
-                delta_str(h.holder_change_1h),
-                delta_str(h.holder_change_6h)
+                "holders 1h {}  6h {}  24h {}",
+                delta_str(t.stats_1h.holder_change),
+                delta_str(t.stats_6h.holder_change),
+                delta_str(t.stats_24h.holder_change)
             ),
             format!(
-                "top10    {}   rest {}",
-                h.top10_pct
-                    .map(|p| format!("{p:.2}%"))
+                "top10 {:>5}  {}",
+                top10.map(|p| format!("{p:.1}%")).unwrap_or_else(|| "—".into()),
+                bar(top10, 18)
+            ),
+            format!(
+                "11-20 {:>5}  {}",
+                t.top11_20_pct.map(|p| format!("{p:.1}%")).unwrap_or_else(|| "—".into()),
+                bar(t.top11_20_pct, 18)
+            ),
+            format!(
+                "rest  {:>5}  {}",
+                t.rest_pct.map(|p| format!("{p:.1}%")).unwrap_or_else(|| "—".into()),
+                bar(t.rest_pct, 18)
+            ),
+            format!(
+                "dev hold {}   organic buyers 24h {}",
+                t.dev_balance_pct
+                    .map(|p| {
+                        if p < 0.01 {
+                            format!("{p:.4}%")
+                        } else {
+                            format!("{p:.2}%")
+                        }
+                    })
                     .unwrap_or_else(|| "—".into()),
-                h.rest_pct
-                    .map(|p| format!("{p:.2}%"))
-                    .unwrap_or_else(|| "—".into())
+                fmt_int(t.stats_24h.organic_buyers)
             ),
             format!(
-                "circ     {}   traders 24h {}",
-                fmt_compact(h.circ_supply),
-                fmt_compact(h.traders_24h.map(|u| u as f64))
+                "circ {} · net buyers {}",
+                fmt_compact(t.circ_supply),
+                fmt_int(t.stats_24h.net_buyers)
             ),
+            "── top holders ──".into(),
         ];
-        for (i, th) in h.top_holders.iter().enumerate() {
+
+        for (i, th) in t.top_holders.iter().enumerate() {
             let pct = th
                 .pct
-                .map(|p| format!("{p:>5.1}%"))
-                .unwrap_or_else(|| "  —  ".into());
+                .map(|p| format!("{p:>5.2}%"))
+                .unwrap_or_else(|| "   —  ".into());
+            let amt = th
+                .ui_amount
+                .map(|a| fmt_compact(Some(a)))
+                .unwrap_or_else(|| "—".into());
+            let flag = if th.insider { " *" } else { "" };
             lines.push(format!(
-                "#{}  {pct}  {}",
+                "#{:<2} {pct}  {:>8}  {}{flag}",
                 i + 1,
+                amt,
                 short_addr(&th.owner, 4)
             ));
+        }
+
+        if let Some(c) = &t.creator {
+            lines.push(format!("creator  {}", short_addr(c, 6)));
+        }
+        if let Some(d) = &t.dev {
+            lines.push(format!("dev      {}", short_addr(d, 6)));
+        }
+        if let Some(n) = t.graph_insiders {
+            lines.push(format!("graph insiders detected  {n}"));
         }
         lines
     }
 
     pub fn header_text(&self) -> String {
+        let price = fmt_usd(self.snap.price_usd());
         let ch = delta_str(self.snap.change_24h());
         let handle = self.feed_mode.label(&self.cfg);
-        let act = self
-            .snap
-            .stats
-            .pointer("/activity_24h/requests")
-            .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
-            .unwrap_or(0);
-        format!(" BULLBOARD · $ANSEM · @{handle} · {ch} · feed · {act} req/24h ")
+        let holders = fmt_int(self.snap.token.holder_count);
+        let liq = fmt_usd(self.snap.token.liquidity.or_else(|| {
+            self.snap
+                .token
+                .primary_pair
+                .as_ref()
+                .and_then(|p| p.liq_usd)
+        }));
+        format!(
+            " BULLBOARD · ANSEM {price} · {ch} · holders {holders} · liq {liq} · @{handle} "
+        )
     }
 
     pub fn footer_text(&self) -> String {

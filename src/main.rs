@@ -13,7 +13,7 @@ use config::Config;
 #[command(
     name = "bullboard",
     version,
-    about = "Surfboard-style terminal dashboard for Bull.inf · $ANSEM · @blknoiz06"
+    about = "Surfboard-style terminal dashboard for $ANSEM · @blknoiz06"
 )]
 struct Cli {
     /// Bull API base URL

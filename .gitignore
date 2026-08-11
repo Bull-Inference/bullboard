@@ -1,4 +1,5 @@
 /target/
+.qa-loop/
 **/*.rs.bk
 .DS_Store
 __pycache__/

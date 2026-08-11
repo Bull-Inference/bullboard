@@ -3,20 +3,11 @@ use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default)]
 pub struct Tweet {
-    #[allow(dead_code)]
     pub id: String,
     pub text: String,
     pub created_at: Option<String>,
-    #[allow(dead_code)]
     pub url: String,
     pub handle: Option<String>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct FeedItem {
-    pub model_id: String,
-    pub cost: Option<f64>,
-    pub created_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -128,13 +119,8 @@ pub struct Token {
 
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
-    pub network: Value,
-    pub config: Value,
     pub price: Value,
     pub ohlc: Value,
-    pub stats: Value,
-    pub stake: Value,
-    pub feed: Vec<FeedItem>,
     pub token: Token,
     pub tweets: Vec<Tweet>,
     pub tweet_error: Option<String>,
@@ -154,7 +140,6 @@ impl Snapshot {
                     .as_ref()
                     .and_then(|p| p.price_usd)
             })
-            .or_else(|| self.network.get("usd_price").and_then(|v| v.as_f64()))
     }
 
     pub fn change_24h(&self) -> Option<f64> {
@@ -202,43 +187,4 @@ impl Snapshot {
         })
     }
 
-    pub fn net_str(&self, key: &str) -> Option<&str> {
-        self.network.get(key).and_then(|v| v.as_str())
-    }
-
-    pub fn net_f(&self, key: &str) -> Option<f64> {
-        self.network.get(key).and_then(|v| {
-            v.as_f64()
-                .or_else(|| v.as_i64().map(|i| i as f64))
-                .or_else(|| v.as_u64().map(|u| u as f64))
-        })
-    }
-
-    pub fn net_bool(&self, key: &str) -> Option<bool> {
-        self.network.get(key).and_then(|v| v.as_bool())
-    }
-
-    pub fn cfg_f(&self, key: &str) -> Option<f64> {
-        self.config.get(key).and_then(|v| {
-            v.as_f64()
-                .or_else(|| v.as_i64().map(|i| i as f64))
-                .or_else(|| v.as_u64().map(|u| u as f64))
-        })
-    }
-
-    pub fn stake_f(&self, key: &str) -> Option<f64> {
-        self.stake.get(key).and_then(|v| {
-            v.as_f64()
-                .or_else(|| v.as_i64().map(|i| i as f64))
-                .or_else(|| v.as_u64().map(|u| u as f64))
-        })
-    }
-
-    pub fn stats_u(&self, key: &str) -> Option<u64> {
-        self.stats.get(key).and_then(|v| {
-            v.as_u64()
-                .or_else(|| v.as_i64().map(|i| i as u64))
-                .or_else(|| v.as_f64().map(|f| f as u64))
-        })
-    }
 }

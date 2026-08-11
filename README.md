@@ -52,7 +52,7 @@ bullboard --handle blknoiz06
 |-----|--------|
 | `q` / `Esc` | quit |
 | `r` | force refresh all |
-| `n` | cycle feed (`blknoiz06` → `bullinference` → both) |
+| `n` | refresh announce feed (`@blknoiz06`) |
 | `Tab` / `Shift+Tab` | focus next / prev pane |
 | `↑↓` / `j k` | scroll focused pane |
 | `PgUp` / `PgDn` | scroll faster |
@@ -68,7 +68,6 @@ Focused pane gets an **acid border** + scrollbar when content overflows.
 |-----|---------|
 | `BULLBOARD_API_BASE` | `https://api.bullinf.fun` |
 | `BULLBOARD_X_HANDLE` | `blknoiz06` |
-| `BULLBOARD_X_HANDLE_ALT` | `bullinference` |
 | `BULLBOARD_MINT` | ANSEM mint |
 
 ## Data (public, no keys)

@@ -1,7 +1,5 @@
 use crate::config::{Config, FeedMode, NITTER_BASES};
-use crate::model::{
-    DexPair, FeedItem, RiskFlag, Snapshot, Token, TopHolder, Tweet, WindowStats,
-};
+use crate::model::{DexPair, RiskFlag, Snapshot, Token, TopHolder, Tweet, WindowStats};
 use anyhow::Result;
 use chrono::Utc;
 use quick_xml::events::Event;
@@ -353,17 +351,13 @@ pub async fn fetch_snapshot(client: &Client, cfg: &Config) -> Snapshot {
         tokio::spawn(async move { (name.to_string(), get_json(&c, &url).await) })
     };
 
+    // $ANSEM token only — no inference / desk / markets feed.
     let tasks = [
-        spawn("network", format!("{base}/api/network")),
-        spawn("config", format!("{base}/api/config")),
         spawn("price", format!("{base}/api/token-price")),
         spawn(
             "ohlc",
             format!("{base}/api/token-ohlc?interval=1h&limit=48"),
         ),
-        spawn("stats", format!("{base}/api/stats")),
-        spawn("stake", format!("{base}/api/stake/stats")),
-        spawn("feed", format!("{base}/api/markets/feed?limit=30")),
         spawn(
             "jupiter",
             format!("https://lite-api.jup.ag/tokens/v2/search?query={mint}"),
@@ -391,36 +385,8 @@ pub async fn fetch_snapshot(client: &Client, cfg: &Config) -> Snapshot {
 
     let mut errors = HashMap::new();
     let mut snap = Snapshot::default();
-    snap.network = take_val(&mut map, "network", &mut errors);
-    snap.config = take_val(&mut map, "config", &mut errors);
     snap.price = take_val(&mut map, "price", &mut errors);
     snap.ohlc = take_val(&mut map, "ohlc", &mut errors);
-    snap.stats = take_val(&mut map, "stats", &mut errors);
-    snap.stake = take_val(&mut map, "stake", &mut errors);
-
-    match map.remove("feed") {
-        Some(Ok(v)) => {
-            if let Some(arr) = v.get("feed").and_then(|f| f.as_array()) {
-                snap.feed = arr
-                    .iter()
-                    .filter_map(|ev| {
-                        Some(FeedItem {
-                            model_id: ev.get("model_id")?.as_str()?.to_string(),
-                            cost: json_f(ev, "cost"),
-                            created_at: ev
-                                .get("created_at")
-                                .and_then(|c| c.as_str())
-                                .map(str::to_string),
-                        })
-                    })
-                    .collect();
-            }
-        }
-        Some(Err(e)) => {
-            errors.insert("feed".into(), e);
-        }
-        None => {}
-    }
 
     let jup = map.remove("jupiter").unwrap_or(Err("missing".into()));
     let gecko = map.remove("gecko").unwrap_or(Err("missing".into()));
@@ -570,22 +536,10 @@ pub async fn fetch_tweets(
 pub async fn fetch_announce(
     client: &Client,
     cfg: &Config,
-    mode: FeedMode,
+    _mode: FeedMode,
     limit: usize,
 ) -> (Vec<Tweet>, Option<String>) {
-    match mode {
-        FeedMode::Primary => fetch_tweets(client, &cfg.x_handle, limit).await,
-        FeedMode::Alt => fetch_tweets(client, &cfg.x_handle_alt, limit).await,
-        FeedMode::Both => {
-            let (a, ea) = fetch_tweets(client, &cfg.x_handle, limit).await;
-            let (b, eb) = fetch_tweets(client, &cfg.x_handle_alt, limit).await;
-            let mut merged = a;
-            merged.extend(b);
-            merged.sort_by(|x, y| y.created_at.cmp(&x.created_at));
-            merged.truncate(limit);
-            (merged, ea.or(eb))
-        }
-    }
+    fetch_tweets(client, &cfg.x_handle, limit).await
 }
 
 pub async fn once_json(cfg: &Config) -> Result<String> {
@@ -619,7 +573,6 @@ pub async fn once_json(cfg: &Config) -> Result<String> {
             "organic_score": t.organic_score,
             "rug_score": t.rug_score,
         },
-        "feed_n": snap.feed.len(),
         "tweets_n": snap.tweets.len(),
         "tweet_error": snap.tweet_error,
         "errors": snap.errors,

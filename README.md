@@ -1,27 +1,39 @@
-# bullboard
+<div align="center">
 
-Surfboard-style **Rust TUI** for **Bull.inf** — stalk **$ANSEM** and **@blknoiz06** from your shell.
+# ⬢ bullboard
 
-Multi-pane dashboard with **scrollable sections** (ratatui). Hero-first KPI cards, colored `POST` badges, dual sparklines, holder distribution, audit signals. Tab-focus a pane, then `j/k` / arrows / mouse wheel to scroll.
+**Surfboard-style Rust TUI for Bull.inf** — stalk `$ANSEM` and `@blknoiz06` from your shell.
 
-<p align="center">
-  <img src="docs/bullboard.png" alt="bullboard — Surfboard-style TUI for $ANSEM / @blknoiz06" width="100%">
-</p>
+![version](https://img.shields.io/badge/version-0.3.2-0a0b09?style=for-the-badge&labelColor=1b1f16)
+![license](https://img.shields.io/badge/license-MIT-0a0b09?style=for-the-badge&labelColor=1b1f16)
+![rust](https://img.shields.io/badge/rust-2021_edition-0a0b09?style=for-the-badge&labelColor=1b1f16&logo=rust&logoColor=c8f542)
+![tui](https://img.shields.io/badge/built_with-ratatui-0a0b09?style=for-the-badge&labelColor=1b1f16)
+![solana](https://img.shields.io/badge/solana-%24ANSEM-0a0b09?style=for-the-badge&labelColor=1b1f16&logo=solana&logoColor=c8f542)
+![x](https://img.shields.io/badge/x-%40blknoiz06-0a0b09?style=for-the-badge&labelColor=1b1f16&logo=x&logoColor=c8f542)
 
-**v0.3.2** visual polish pass — closer to MAXPANE / Surfboard hierarchy.
+<img src="docs/bullboard.png" alt="bullboard — Surfboard-style TUI for $ANSEM / @blknoiz06" width="100%" />
 
-```
-BULLBOARD · $ANSEM · @blknoiz06 · feed · activity
-```
+</div>
 
-## Install
+---
+
+## ✨ Features
+
+- **Multi-pane dashboard** — Surfboard / MAXPANE-style layout built on `ratatui`
+- **Hero KPI cards** — `$ANSEM` price, 24h change, volume, liquidity, holders at a glance
+- **Announce feed** — `POST`-badged tweets from `@blknoiz06`, each with a `[ view tweet ]` button
+- **Live market data** — dual sparklines (price + volume), holder distribution bars, top wallets
+- **Signals & activity** — health signals, DEX flow, and the Bull.inf inference feed
+- **Mouse-first interaction** — hover highlighting, click-to-focus, wheel-to-scroll
+- **Keyboard-driven** — tab-focus panes, jump with `1`–`9`, scroll with `j/k`, open tweets with `o`
+- **Auto-refresh** — data every 15s, feed every 60s; a failing endpoint shows `—`, never crashes
+
+## 🚀 Install
 
 ### Cargo (recommended)
 
 ```bash
-cargo install --path /path/to/bullboard
-# or from git once published:
-# cargo install --git https://github.com/Bull-Inference/bullboard
+cargo install --git https://github.com/Bull-Inference/bullboard
 ```
 
 Binary: `bullboard` on your PATH (`~/.cargo/bin`).
@@ -29,6 +41,7 @@ Binary: `bullboard` on your PATH (`~/.cargo/bin`).
 ### From this repo
 
 ```bash
+git clone https://github.com/Bull-Inference/bullboard
 cd bullboard
 cargo build --release
 cargo install --path .
@@ -42,15 +55,15 @@ The original Textual app lives in `legacy-python/` if you still want it:
 pipx install ./legacy-python
 ```
 
-## Run
+## ▶️ Run
 
 ```bash
-bullboard
-bullboard --once          # JSON smoke, no TUI
-bullboard --handle blknoiz06
+bullboard                    # launch the TUI
+bullboard --once             # fetch snapshot JSON and exit (no TUI)
+bullboard --handle blknoiz06 # override the announce feed handle
 ```
 
-### Keys
+## ⌨️ Keys
 
 | Key | Action |
 |-----|--------|
@@ -59,14 +72,14 @@ bullboard --handle blknoiz06
 | `n` | refresh announce feed (`@blknoiz06`) |
 | `Tab` / `Shift+Tab` | focus next / prev pane |
 | `↑↓` / `j k` | scroll focused pane |
-| `PgUp` / `PgDn` | scroll faster |
-| `Home` | scroll to top |
+| `PgUp` / `PgDn` · `f` / `b` · `Space` | scroll faster |
+| `Home` / `g` | scroll to top |
+| `End` / `G` | scroll to bottom |
+| `Enter` / `o` | open tweet under cursor |
 | `1`–`9` | jump focus to pane |
-| mouse wheel | scroll focused pane |
+| mouse | hover highlight · click focuses · wheel scrolls pane under cursor |
 
-Focused pane gets an **acid border** + scrollbar when content overflows.
-
-## Env
+## ⚙️ Env
 
 | Var | Default |
 |-----|---------|
@@ -74,14 +87,24 @@ Focused pane gets an **acid border** + scrollbar when content overflows.
 | `BULLBOARD_X_HANDLE` | `blknoiz06` |
 | `BULLBOARD_MINT` | ANSEM mint |
 
-## Data (public, no keys)
+## 📡 Data (public, no keys)
 
-- Bull.inf: network, price, OHLC, stake, markets feed
-- Jupiter / Gecko / Rugcheck: holder count, distribution, top wallets
-- Nitter RSS: @blknoiz06 announce feed
+| Pane | Source |
+|------|--------|
+| Network / gate / treasury | Bull.inf `GET /api/network` + `/api/config` |
+| Price / mcap / spark | `GET /api/token-price` + `/api/token-ohlc` |
+| Stake / fees | `GET /api/stake/stats` |
+| Announce feed | Nitter RSS for `@blknoiz06` |
+| Signals | Derived health from network + stats + markets |
+| DEX flow / inference | `GET /api/markets/feed` + `GET /api/markets` |
+| Holders / distribution | Jupiter / Gecko / Rugcheck |
 
 Mint: `9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump` · Desk: [bullinf.fun](https://bullinf.fun)
 
-## Inspired by
+## 🔗 Inspired by
 
 [Surfboard / MAXPANE](https://x.com/cryptokarlheinz/status/2086826710180286738)
+
+## 📄 License
+
+MIT — see [LICENSE](LICENSE)

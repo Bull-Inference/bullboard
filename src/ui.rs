@@ -75,16 +75,17 @@ impl PaneId {
 
     pub fn title(self) -> &'static str {
         match self {
-            // Top cards: short Surfboard-style labels
+            // Top cards: same plain style as the side panes so the board
+            // reads as one thing, not a jargon shelf + a data rail.
             PaneId::Gate => "PRICE",
             PaneId::Treasury => "LIQUIDITY",
-            PaneId::Stake => "AUDIT",
+            PaneId::Stake => "SAFETY",
             PaneId::Mcap => "SUPPLY",
             PaneId::Announce => "ANNOUNCE FEED",
             PaneId::Signals => "SIGNALS",
-            PaneId::Activity => "DEX FLOW",
-            PaneId::Market => "ANSEM MARKET",
-            PaneId::Holders => "HOLDERS / DIST",
+            PaneId::Activity => "ACTIVITY",
+            PaneId::Market => "MARKET",
+            PaneId::Holders => "HOLDERS",
         }
     }
 

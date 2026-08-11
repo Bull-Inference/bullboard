@@ -60,12 +60,11 @@ Nine panes on one screen — price and 24h change up top, then:
 
 | Pane | What it tells you |
 |------|-------------------|
-| Gate / Treasury / Audit | Price flow, liquidity, and whether the token contract is safe (mint/freeze off) |
-| Mcap / Supply | Holders, market cap, circulating supply |
+| PRICE · LIQUIDITY · SAFETY · SUPPLY | The four top cards: price + volume, liquidity (Gecko cross-checked), contract safety (mint/freeze/rug/LP lock), and supply + FDV |
 | **Announce feed** | `@blknoiz06`'s tweets, newest first — click or press `o` to open one |
 | Signals | Plain-English health checks: is liquidity deep? are top holders concentrated? |
 | Activity | Buy/sell volume, DEX pair flow, and a Gecko cross-check on liquidity |
-| Market / Holders | Sparklines and holder distribution |
+| Market / Holders | Sparklines, 24h high/low, and holder distribution |
 
 ## Keys — the short version
 

@@ -245,6 +245,23 @@ impl Snapshot {
             .unwrap_or_default()
     }
 
+    /// 24h high/low from the last 24 hourly candles.
+    pub fn range_24h(&self) -> (Option<f64>, Option<f64>) {
+        let mut hi = None;
+        let mut lo = None;
+        if let Some(arr) = self.ohlc.get("candles").and_then(|c| c.as_array()) {
+            for c in arr.iter().rev().take(24) {
+                if let Some(h) = c.get("high").and_then(|v| v.as_f64()) {
+                    hi = Some(hi.map_or(h, |x: f64| x.max(h)));
+                }
+                if let Some(l) = c.get("low").and_then(|v| v.as_f64()) {
+                    lo = Some(lo.map_or(l, |x: f64| x.min(l)));
+                }
+            }
+        }
+        (hi, lo)
+    }
+
     pub fn ohlc_stat_f(&self, key: &str) -> Option<f64> {
         self.ohlc.pointer(&format!("/stats/{key}")).and_then(|v| {
             v.as_f64()

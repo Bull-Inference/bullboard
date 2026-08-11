@@ -276,6 +276,8 @@ impl App {
             fmt_usd(self.snap.price_usd()),
             format!("24h {}", delta_str(self.snap.change_24h())),
             format!("vol {}", fmt_usd(vol24)),
+            // Second-opinion price, always visible (not just on divergence).
+            format!("gecko {}", fmt_usd(self.snap.gecko_token.price_usd)),
         ]
     }
 
@@ -286,7 +288,7 @@ impl App {
         let total = t.total_liquidity();
         let pools = t.pairs.len();
         let Some(p) = t.primary_pair.as_ref() else {
-            return vec![
+            let mut lines = vec![
                 fmt_usd(total),
                 "no pair".into(),
                 if pools > 0 {
@@ -295,6 +297,10 @@ impl App {
                     "—".into()
                 },
             ];
+            if let Some(g) = self.snap.gecko_liq_usd() {
+                lines.push(format!("gecko {}", fmt_usd(Some(g))));
+            }
+            return lines;
         };
         let pools_s = if pools == 1 {
             "1 pool".into()
@@ -305,7 +311,17 @@ impl App {
             Some(r) if r > 0.0 => format!("{pools_s} · rug {}", fmt_usd(Some(r))),
             _ => format!("{pools_s} · primary {}", fmt_usd(p.liq_usd)),
         };
-        vec![
+        // Second-opinion liquidity with the same (!) disagreement flag the
+        // Activity pane uses, so the card and the rail agree.
+        let mut gk = String::new();
+        if let Some(g) = self.snap.gecko_liq_usd() {
+            let flag = match total {
+                Some(h) if h > 0.0 && (g - h).abs() / h > 0.25 => " (!)",
+                _ => "",
+            };
+            gk = format!("gecko {}{flag}", fmt_usd(Some(g)));
+        }
+        let mut lines = vec![
             fmt_usd(total),
             format!(
                 "{} · {}",
@@ -313,7 +329,11 @@ impl App {
                 short_addr(&p.pair_address, 5)
             ),
             whisper,
-        ]
+        ];
+        if !gk.is_empty() {
+            lines.push(gk);
+        }
+        lines
     }
 
     fn lines_audit(&self) -> Vec<String> {
@@ -328,6 +348,10 @@ impl App {
         } else {
             "REVIEW".to_string()
         };
+        let lp = t
+            .lp_locked_pct
+            .map(|p| format!("{p:.0}%"))
+            .unwrap_or_else(|| "—".into());
         vec![
             hero,
             format!(
@@ -338,6 +362,7 @@ impl App {
             t.rug_score
                 .map(|s| format!("rug {s:.0}"))
                 .unwrap_or_else(|| "rug —".into()),
+            format!("lp {lp} locked"),
         ]
     }
 
@@ -349,10 +374,16 @@ impl App {
                 .or_else(|| self.snap.ohlc_stat_f("market_cap"))
                 .or_else(|| self.snap.gecko_token.market_cap),
         );
+        let fdv = fmt_usd(
+            t.fdv
+                .or_else(|| self.snap.gecko_token.fdv)
+                .or_else(|| t.primary_pair.as_ref().and_then(|p| p.fdv)),
+        );
         vec![
             holders,
             format!("mcap {mcap}"),
             format!("circ {}", fmt_compact(t.circ_supply)),
+            format!("fdv {fdv}"),
         ]
     }
 
@@ -590,8 +621,8 @@ impl App {
                 head.push_str(&format!(" · gecko {}", fmt_usd(Some(gk))));
             }
         }
->>>>>>> 778cc58 (feat(data): cross-check liquidity and price with GeckoTerminal)
-        // ≤6 lines: price+24h, windows, blank, vol·liq, price spark, vol spark
+        // ≤6 lines: price+24h, windows, 24h range, vol·liq, price spark, vol spark
+        let (hi, lo) = s.range_24h();
         vec![
             head,
             format!(
@@ -600,7 +631,7 @@ impl App {
                 delta_str(t.stats_1h.price_change.or_else(|| p.and_then(|x| x.change_h1))),
                 delta_str(t.stats_6h.price_change.or_else(|| p.and_then(|x| x.change_h6)))
             ),
-            String::new(),
+            format!("24h {} / {}", fmt_usd(lo), fmt_usd(hi)),
             format!("vol {} · liq {}", fmt_usd(vol24), fmt_usd(liq)),
             format!("price {price_spark}"),
             format!("vol   {vol_spark}"),
@@ -636,7 +667,7 @@ impl App {
             ),
             String::new(),
         ];
-        for (i, th) in t.top_holders.iter().take(3).enumerate() {
+        for (i, th) in t.top_holders.iter().take(4).enumerate() {
             let pct = th
                 .pct
                 .map(|p| format!("{p:>5.2}%"))
@@ -1196,5 +1227,6 @@ mod tests {
         assert_eq!(fresh, vec![2]);
     }
 }
+
 
 

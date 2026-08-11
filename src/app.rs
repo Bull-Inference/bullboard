@@ -395,7 +395,8 @@ impl App {
     }
 
     /// Total LP across every live pool (DexScreener sum), cross-checked with
-    /// Rugcheck's market-wide total. Primary pool shown as detail/whisper.
+    /// RugCheck's market-wide total and GeckoTerminal's per-pool reserves.
+    /// Every source gets its own named line so a number is never orphaned.
     fn lines_primary_lp(&self) -> Vec<String> {
         let t = &self.snap.token;
         let total = t.total_liquidity();
@@ -420,10 +421,6 @@ impl App {
         } else {
             format!("{pools} pools")
         };
-        let whisper = match t.total_market_liq {
-            Some(r) if r > 0.0 => format!("{pools_s} · rug {}", fmt_usd(Some(r))),
-            _ => format!("{pools_s} · primary {}", fmt_usd(p.liq_usd)),
-        };
         // Line 2: DEX + the pair it quotes, e.g. "PUMPSWAP ANSEM/SOL".
         let quote = p.quote_symbol.trim();
         let pair_line = if quote.is_empty() || quote == "?" {
@@ -444,8 +441,17 @@ impl App {
         let mut lines = vec![
             fmt_usd(total),
             pair_line,
-            whisper,
+            pools_s,
         ];
+        // RugCheck.xyz independently scans the same markets — its total is
+        // the second opinion for the headline number.
+        if let Some(r) = t.total_market_liq {
+            if r > 0.0 {
+                lines.push(format!("rugcheck {}", fmt_usd(Some(r))));
+            }
+        } else if let Some(pl) = p.liq_usd {
+            lines.push(format!("primary {}", fmt_usd(Some(pl))));
+        }
         if !gk.is_empty() {
             lines.push(gk);
         }

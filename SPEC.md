@@ -10,10 +10,11 @@ npm launcher is optional.
 ```
    BULLBOARD · ANSEM $0.2090 · 24h ▲ +19.22% · vol $20.25M · src 8/8
  ┌ PRICE ────────┐ ┌ LIQUIDITY ─────────┐ ┌ SAFETY ───────────┐ ┌ SUPPLY ──────────┐
- │    $0.2090    │ │      $2.13M        │ │      CLEAN        │ │     142,175      │
+ │    $0.2090    │ │      $4.57M        │ │      CLEAN        │ │     142,175      │
  │ 24h ▲ +19.22% │ │ PUMPSWAP ANSEM/SOL │ │ mint off·freezeoff│ │ mcap $208.99M    │
- │ vol $20.24M   │ │    FnzKY…8L3CC     │ │ rug 43·insiders 12│ │ circ 999.82M     │
- │  gecko $0.2091│ │  gecko $2.80M (!)  │ │   lp 82% locked   │ │   fdv $208.99M   │
+ │ vol $20.24M   │ │      30 pools      │ │ rug 43·insiders 12│ │ circ 999.82M     │
+ │  gecko $0.2091│ │  rugcheck $4.58M   │ │   lp 82% locked   │ │   fdv $208.99M   │
+ │               │ │   gecko $2.80M (!) │ │                   │ │                  │
  ┌ ANNOUNCE · @blknoiz06 · 9s · last 3h · ↕ ─────────────┐  SIGNALS · ↕
  │ 08-11 06:27 POST RT @Saint10Fourteen no disrespect…    │  ● MINT AUTH  disabled·safe
  │   [ view tweet ]                                       │  ● FREEZE AUTH disabled·safe

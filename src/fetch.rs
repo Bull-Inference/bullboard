@@ -524,6 +524,9 @@ pub async fn fetch_tweets(
         match get_text(client, &url).await {
             Ok(xml) => {
                 let mut tweets = parse_rss(&xml, handle);
+                // Newest first — created_at is ISO-8601 UTC, so string cmp is chronological.
+                // Sort before truncating so the newest `limit` survive regardless of feed order.
+                tweets.sort_by(|a, b| b.created_at.cmp(&a.created_at));
                 tweets.truncate(limit);
                 return (tweets, None);
             }

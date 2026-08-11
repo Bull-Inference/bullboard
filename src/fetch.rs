@@ -1,5 +1,7 @@
 use crate::config::{Config, FeedMode};
-use crate::model::{DexPair, RiskFlag, Snapshot, Token, TopHolder, Tweet, WindowStats};
+use crate::model::{
+    DexPair, GeckoPool, GeckoToken, RiskFlag, Snapshot, Token, TopHolder, Tweet, WindowStats,
+};
 use anyhow::Result;
 use chrono::Utc;
 use quick_xml::events::Event;
@@ -342,6 +344,60 @@ fn parse_token(
     t
 }
 
+fn parse_gecko_token(
+    raw: Result<Value, String>,
+    errors: &mut HashMap<String, String>,
+) -> GeckoToken {
+    let v = match raw {
+        Ok(v) => v,
+        Err(e) => {
+            errors.insert("gecko-token".into(), e);
+            return GeckoToken::default();
+        }
+    };
+    let mut g = GeckoToken::default();
+    if let Some(attrs) = v.pointer("/data/attributes") {
+        g.price_usd = json_f(attrs, "price_usd");
+        if let Some(pct) = attrs.get("price_change_percentage") {
+            g.change_24h = json_f(pct, "h24");
+        }
+        g.market_cap = json_f(attrs, "market_cap_usd");
+        g.fdv = json_f(attrs, "fdv_usd");
+        // volume_usd is nested: { "h24": "…" }
+        g.vol_24h = attrs
+            .get("volume_usd")
+            .and_then(|v| json_f(v, "h24"));
+        g.liquidity = json_f(attrs, "total_reserve_in_usd");
+    }
+    g
+}
+
+fn parse_gecko_pools(
+    raw: Result<Value, String>,
+    errors: &mut HashMap<String, String>,
+) -> Vec<GeckoPool> {
+    let v = match raw {
+        Ok(v) => v,
+        Err(e) => {
+            errors.insert("gecko-pools".into(), e);
+            return Vec::new();
+        }
+    };
+    let mut pools = Vec::new();
+    if let Some(arr) = v.get("data").and_then(|d| d.as_array()) {
+        for p in arr.iter().take(6) {
+            let attrs = p.get("attributes").cloned().unwrap_or(Value::Null);
+            pools.push(GeckoPool {
+                id: json_str(p, "id").unwrap_or_default(),
+                liq_usd: json_f(&attrs, "reserve_in_usd"),
+                vol_usd: json_f(&attrs, "volume_usd"),
+                price_usd: json_f(&attrs, "base_token_price_usd"),
+            });
+        }
+    }
+    pools
+}
+
 pub async fn fetch_snapshot(client: &Client, cfg: &Config) -> Snapshot {
     let base = cfg.api_base.trim_end_matches('/');
     let mint = cfg.mint.clone();
@@ -365,6 +421,17 @@ pub async fn fetch_snapshot(client: &Client, cfg: &Config) -> Snapshot {
         spawn(
             "gecko",
             format!("https://api.geckoterminal.com/api/v2/networks/solana/tokens/{mint}/info"),
+        ),
+        // Second opinion sources for price / liquidity cross-checks. Gecko's
+        // free tier allows ~30 calls/min per IP; 3 endpoints × 4 polls/min
+        // stays under that, and a 429 just lands in `errors` as a "—".
+        spawn(
+            "gecko-token",
+            format!("https://api.geckoterminal.com/api/v2/networks/solana/tokens/{mint}"),
+        ),
+        spawn(
+            "gecko-pools",
+            format!("https://api.geckoterminal.com/api/v2/networks/solana/tokens/{mint}/pools?page=1"),
         ),
         spawn(
             "rugcheck",
@@ -390,9 +457,13 @@ pub async fn fetch_snapshot(client: &Client, cfg: &Config) -> Snapshot {
 
     let jup = map.remove("jupiter").unwrap_or(Err("missing".into()));
     let gecko = map.remove("gecko").unwrap_or(Err("missing".into()));
+    let gecko_token = map.remove("gecko-token").unwrap_or(Err("missing".into()));
+    let gecko_pools = map.remove("gecko-pools").unwrap_or(Err("missing".into()));
     let rug = map.remove("rugcheck").unwrap_or(Err("missing".into()));
     let dex = map.remove("dex").unwrap_or(Err("missing".into()));
     snap.token = parse_token(&mint, jup, gecko, rug, dex, &mut errors);
+    snap.gecko_token = parse_gecko_token(gecko_token, &mut errors);
+    snap.gecko_pools = parse_gecko_pools(gecko_pools, &mut errors);
     snap.errors = errors;
     snap.fetched_at = Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
     snap
@@ -864,6 +935,13 @@ pub async fn once_json(cfg: &Config) -> Result<String> {
         },
         "tweets_n": snap.tweets.len(),
         "tweet_error": snap.tweet_error,
+        "gecko": {
+            "price_usd": snap.gecko_token.price_usd,
+            "liq_usd": snap.gecko_liq_usd(),
+            "vol_24h": snap.gecko_token.vol_24h,
+            "mcap": snap.gecko_token.market_cap,
+            "pools": snap.gecko_pools.len(),
+        },
         "errors": snap.errors,
     });
     Ok(serde_json::to_string_pretty(&out)?)
@@ -1016,5 +1094,61 @@ mod tests {
             h.observe(true, true, false, 1000); // plain ok every time
         }
         assert_ne!(h.plan(1001), MirrorPlan::Skip);
+    }
+
+    #[test]
+    fn parses_gecko_token() {
+        let raw = Ok(serde_json::json!({"data": {"attributes": {
+            "price_usd": "0.2131",
+            "price_change_percentage": {"h24": "5.2"},
+            "market_cap_usd": "213100000",
+            "fdv_usd": "213200000",
+            "total_reserve_in_usd": "2813776.01",
+            "volume_usd": {"h24": "14899982.77"},
+        }}}));
+        let mut errors = HashMap::new();
+        let g = parse_gecko_token(raw, &mut errors);
+        assert_eq!(g.price_usd, Some(0.2131));
+        assert_eq!(g.change_24h, Some(5.2));
+        assert_eq!(g.market_cap, Some(213100000.0));
+        assert_eq!(g.fdv, Some(213200000.0));
+        assert_eq!(g.vol_24h, Some(14899982.77));
+        assert_eq!(g.liquidity, Some(2813776.01));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn parses_gecko_pools() {
+        let raw = Ok(serde_json::json!({"data": [
+            {"id": "solana_a", "attributes": {
+                "reserve_in_usd": "2012345",
+                "volume_usd": "1900000",
+                "base_token_price_usd": "0.2131"
+            }},
+            {"id": "solana_b", "attributes": {
+                "reserve_in_usd": "500000",
+                "volume_usd": "700000",
+                "base_token_price_usd": "0.2130"
+            }},
+        ]}));
+        let mut errors = HashMap::new();
+        let pools = parse_gecko_pools(raw, &mut errors);
+        assert_eq!(pools.len(), 2);
+        assert_eq!(pools[0].id, "solana_a");
+        assert_eq!(pools[0].liq_usd, Some(2012345.0));
+        assert_eq!(pools[1].vol_usd, Some(700000.0));
+        assert_eq!(pools[1].price_usd, Some(0.2130));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn gecko_errors_are_recorded_not_fatal() {
+        let mut errors = HashMap::new();
+        let g = parse_gecko_token(Err("HTTP 429".into()), &mut errors);
+        assert_eq!(g.price_usd, None);
+        assert_eq!(errors.get("gecko-token").map(String::as_str), Some("HTTP 429"));
+        let pools = parse_gecko_pools(Err("HTTP 429".into()), &mut errors);
+        assert!(pools.is_empty());
+        assert!(errors.contains_key("gecko-pools"));
     }
 }

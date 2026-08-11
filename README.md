@@ -64,7 +64,7 @@ Nine panes on one screen — price and 24h change up top, then:
 | Mcap / Supply | Holders, market cap, circulating supply |
 | **Announce feed** | `@blknoiz06`'s tweets, newest first — click or press `o` to open one |
 | Signals | Plain-English health checks: is liquidity deep? are top holders concentrated? |
-| Activity | Buy/sell volume and DEX pair flow |
+| Activity | Buy/sell volume, DEX pair flow, and a Gecko cross-check on liquidity |
 | Market / Holders | Sparklines and holder distribution |
 
 ## Keys — the short version
@@ -120,7 +120,7 @@ That's the whole "resilience" story. The only time you'd touch `BULLBOARD_MIRROR
 | Price / 24h / sparklines | Bull.inf API (`api.bullinf.fun`) |
 | Token details / holders | Jupiter · GeckoTerminal |
 | Security / rug check | RugCheck |
-| DEX pairs / liquidity | DexScreener |
+| DEX pairs / liquidity | DexScreener · GeckoTerminal (cross-checked — shows a `(!)` when they disagree) |
 | Announce feed | Nitter mirrors (public RSS) |
 
 ## If something looks wrong

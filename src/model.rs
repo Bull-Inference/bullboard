@@ -68,6 +68,29 @@ pub struct RiskFlag {
     pub value: String,
 }
 
+/// GeckoTerminal token endpoint — a second independent price / volume /
+/// market-cap source to cross-check against Bull.inf and Jupiter.
+#[derive(Clone, Debug, Default)]
+pub struct GeckoToken {
+    pub price_usd: Option<f64>,
+    pub change_24h: Option<f64>,
+    pub market_cap: Option<f64>,
+    pub fdv: Option<f64>,
+    pub vol_24h: Option<f64>,
+    /// `total_reserve_in_usd` — Gecko's authoritative token-level liquidity.
+    pub liquidity: Option<f64>,
+}
+
+/// One GeckoTerminal pool — per-pool on-chain reserves are usually closer to
+/// real liquidity than DexScreener's summed figure.
+#[derive(Clone, Debug, Default)]
+pub struct GeckoPool {
+    pub id: String,
+    pub liq_usd: Option<f64>,
+    pub vol_usd: Option<f64>,
+    pub price_usd: Option<f64>,
+}
+
 /// Aggregated $ANSEM on-chain / market intelligence.
 #[derive(Clone, Debug, Default)]
 pub struct Token {
@@ -144,6 +167,8 @@ pub struct Snapshot {
     pub price: Value,
     pub ohlc: Value,
     pub token: Token,
+    pub gecko_token: GeckoToken,
+    pub gecko_pools: Vec<GeckoPool>,
     pub tweets: Vec<Tweet>,
     pub tweet_error: Option<String>,
     pub errors: HashMap<String, String>,
@@ -162,6 +187,7 @@ impl Snapshot {
                     .as_ref()
                     .and_then(|p| p.price_usd)
             })
+            .or_else(|| self.gecko_token.price_usd)
     }
 
     pub fn change_24h(&self) -> Option<f64> {
@@ -175,6 +201,24 @@ impl Snapshot {
                     .and_then(|p| p.change_h24)
             })
             .or_else(|| self.ohlc.pointer("/stats/change_24h").and_then(|v| v.as_f64()))
+            .or_else(|| self.gecko_token.change_24h)
+    }
+
+    /// Gecko's view of liquidity: the token endpoint's `total_reserve_in_usd`
+    /// when available, else the sum of per-pool reserves.
+    pub fn gecko_liq_usd(&self) -> Option<f64> {
+        if let Some(v) = self.gecko_token.liquidity {
+            return Some(v);
+        }
+        let mut sum = 0.0;
+        let mut any = false;
+        for p in &self.gecko_pools {
+            if let Some(v) = p.liq_usd {
+                sum += v;
+                any = true;
+            }
+        }
+        any.then_some(sum)
     }
 
     pub fn closes(&self) -> Vec<f64> {

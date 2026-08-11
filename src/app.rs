@@ -344,7 +344,11 @@ impl App {
     fn lines_supply(&self) -> Vec<String> {
         let t = &self.snap.token;
         let holders = fmt_int(t.holder_count);
-        let mcap = fmt_usd(t.mcap.or_else(|| self.snap.ohlc_stat_f("market_cap")));
+        let mcap = fmt_usd(
+            t.mcap
+                .or_else(|| self.snap.ohlc_stat_f("market_cap"))
+                .or_else(|| self.snap.gecko_token.market_cap),
+        );
         vec![
             holders,
             format!("mcap {mcap}"),
@@ -482,7 +486,8 @@ impl App {
     }
 
     fn lines_activity(&self) -> Vec<String> {
-        let t = &self.snap.token;
+        let s = &self.snap;
+        let t = &s.token;
         let mut lines = Vec::new();
         // One row per window (not two).
         for (label, w) in [
@@ -536,6 +541,23 @@ impl App {
         if t.pairs.is_empty() {
             lines.push("no pair data".into());
         }
+        // Second-opinion liquidity from Gecko's per-pool reserves; flag it
+        // with (!) when it disagrees with DexScreener by more than 25% —
+        // Gecko's per-pool reserves are usually the real number.
+        if let Some(g_liq) = s.gecko_liq_usd() {
+            let dex_liq: f64 = t.pairs.iter().filter_map(|x| x.liq_usd).sum();
+            let flag = if dex_liq > 0.0 && (g_liq - dex_liq).abs() / dex_liq > 0.25 {
+                " (!)"
+            } else {
+                ""
+            };
+            lines.push(format!(
+                "gecko  {} pools · liq {} vol {}{flag}",
+                s.gecko_pools.len(),
+                fmt_usd(Some(g_liq)),
+                fmt_usd(s.gecko_token.vol_24h),
+            ));
+        }
         lines
     }
 
@@ -551,17 +573,27 @@ impl App {
             .zip(t.stats_24h.sell_volume)
             .map(|(b, se)| b + se)
             .or_else(|| p.and_then(|x| x.vol_h24))
-            .or_else(|| s.ohlc_stat_f("volume_24h"));
+            .or_else(|| s.ohlc_stat_f("volume_24h"))
+            .or_else(|| s.gecko_token.vol_24h);
         let liq = t
             .total_liquidity()
-            .or_else(|| s.ohlc_stat_f("liquidity_usd"));
+            .or_else(|| s.ohlc_stat_f("liquidity_usd"))
+            .or_else(|| s.gecko_liq_usd());
+        // Second-opinion price: surface it when sources diverge > 1%.
+        let mut head = format!(
+            "ANSEM {}   24h {}",
+            fmt_usd(s.price_usd()),
+            delta_str(s.change_24h())
+        );
+        if let (Some(px), Some(gk)) = (s.price_usd(), s.gecko_token.price_usd) {
+            if px != 0.0 && ((gk - px).abs() / px.abs()) > 0.01 {
+                head.push_str(&format!(" · gecko {}", fmt_usd(Some(gk))));
+            }
+        }
+>>>>>>> 778cc58 (feat(data): cross-check liquidity and price with GeckoTerminal)
         // ≤6 lines: price+24h, windows, blank, vol·liq, price spark, vol spark
         vec![
-            format!(
-                "ANSEM {}   24h {}",
-                fmt_usd(s.price_usd()),
-                delta_str(s.change_24h())
-            ),
+            head,
             format!(
                 "5m {}  1h {}  6h {}",
                 delta_str(t.stats_5m.price_change.or_else(|| p.and_then(|x| x.change_m5))),

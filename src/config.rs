@@ -5,7 +5,7 @@ pub const DEFAULT_API: &str = "https://api.bullinf.fun";
 pub const DEFAULT_HANDLE: &str = "blknoiz06";
 
 pub const REFRESH_DATA_SECS: u64 = 15;
-pub const REFRESH_FEED_SECS: u64 = 60;
+pub const REFRESH_FEED_SECS: u64 = 30;
 
 pub const NITTER_BASES: &[&str] = &[
     "https://nitter.net",
@@ -31,6 +31,8 @@ pub struct Config {
     pub api_base: String,
     pub x_handle: String,
     pub mint: String,
+    /// Initial desktop-notify state (BULLBOARD_NOTIFY=1); `t` toggles at runtime.
+    pub notify: bool,
 }
 
 impl Config {
@@ -42,6 +44,9 @@ impl Config {
                 .trim_start_matches('@')
                 .to_string(),
             mint: env::var("BULLBOARD_MINT").unwrap_or_else(|_| ANSEM_MINT.into()),
+            notify: env::var("BULLBOARD_NOTIFY")
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(false),
         }
     }
 }

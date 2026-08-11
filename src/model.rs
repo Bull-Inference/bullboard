@@ -8,6 +8,12 @@ pub struct Tweet {
     pub created_at: Option<String>,
     pub url: String,
     pub handle: Option<String>,
+    /// True when this item is a retweet (Nitter titles them "RT by @…").
+    pub retweet: bool,
+    /// Original author of a retweet, parsed from the status URL.
+    pub retweet_of: Option<String>,
+    /// Quoted author of a quote retweet, parsed from the embedded blockquote.
+    pub quote_author: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]

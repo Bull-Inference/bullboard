@@ -19,7 +19,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::Terminal;
 use reqwest::Client;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::stdout;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -49,12 +49,17 @@ pub struct App {
     pub loading: bool,
     pub should_quit: bool,
     pub status: String,
+    /// Desktop notifications on (`t` toggles; BULLBOARD_NOTIFY sets initial).
+    pub notify_enabled: bool,
     last_data: Instant,
     last_feed: Instant,
+    /// Tweet ids already announced; a new id fires a desktop notification.
+    seen_tweets: HashSet<String>,
 }
 
 impl App {
     pub fn new(cfg: Config, client: Client) -> Self {
+        let notify = cfg.notify;
         Self {
             cfg,
             client,
@@ -69,8 +74,10 @@ impl App {
             loading: false,
             should_quit: false,
             status: "loading…".into(),
+            notify_enabled: notify,
             last_data: Instant::now() - Duration::from_secs(999),
             last_feed: Instant::now() - Duration::from_secs(999),
+            seen_tweets: HashSet::new(),
         }
     }
 
@@ -192,10 +199,44 @@ impl App {
     pub async fn refresh_feed(&mut self) {
         let (tweets, err) =
             fetch_announce(&self.client, &self.cfg, self.feed_mode, 40).await;
-        self.snap.tweets = tweets;
-        self.snap.tweet_error = err;
+        // Nitter mirrors are flaky: if a poll comes back empty with an error,
+        // keep the last good feed so the pane never blanks on a hiccup.
+        if tweets.is_empty() && err.is_some() && !self.snap.tweets.is_empty() {
+            self.snap.tweet_error = err;
+        } else {
+            self.notify_new_tweets(&tweets);
+            self.snap.tweets = tweets;
+            self.snap.tweet_error = err;
+        }
         self.last_feed = Instant::now();
         // reset announce scroll on feed cycle only if empty scroll keep
+    }
+
+    /// Fire desktop notifications for announce tweets seen for the first time
+    /// (only while the `t` toggle is on). The first fetch just seeds the
+    /// seen-set, so a fresh run doesn't replay the whole feed as a wall of
+    /// notifications. The seen-set always tracks the feed, so toggling off and
+    /// back on never replays posts that arrived in between.
+    fn notify_new_tweets(&mut self, tweets: &[Tweet]) {
+        let seeded = !self.seen_tweets.is_empty();
+        let fresh = mark_new_tweets(&mut self.seen_tweets, tweets, seeded);
+        if !self.notify_enabled {
+            return;
+        }
+        for i in fresh {
+            let t = &tweets[i];
+            let mut body = t.text.replace('\n', " ").trim().to_string();
+            if body.chars().count() > 140 {
+                body = body.chars().take(137).collect::<String>() + "…";
+            }
+            if let Some(url) = tweet_view_url(t) {
+                body.push_str(&format!(" — {url}"));
+            }
+            let title = format!("⬢ @{} posted", self.cfg.x_handle);
+            tokio::task::spawn_blocking(move || {
+                let _ = notify_desktop(&title, &body);
+            });
+        }
     }
 
     pub async fn refresh_all(&mut self) {
@@ -308,13 +349,31 @@ impl App {
             if text.chars().count() > 160 {
                 text = text.chars().take(157).collect::<String>() + "…";
             }
+            // Tag retweets / quote retweets so they don't read like original posts.
+            let tag = if let Some(a) = &t.quote_author {
+                format!("QT @{a} ")
+            } else if let Some(a) = &t.retweet_of {
+                format!("RT @{a} ")
+            } else if t.retweet {
+                "RT ".into()
+            } else {
+                String::new()
+            };
             // POST body → blank → button → blank (between posts)
-            out.push(format!("{} POST {}", when, text));
+            out.push(format!("{} POST {}{}", when, tag, text));
             out.push(String::new());
             if tweet_view_url(t).is_some() {
                 out.push(VIEW_TWEET_BTN.to_string());
             }
             out.push(String::new());
+        }
+        // A failed poll keeps the last good feed — surface it so a stale
+        // pane doesn't read as frozen.
+        if let Some(e) = &s.tweet_error {
+            out.push(format!(
+                "— mirror error, showing last good ({})",
+                e.chars().take(50).collect::<String>()
+            ));
         }
         out
     }
@@ -557,8 +616,9 @@ impl App {
     pub fn footer_text(&self) -> String {
         let updated = ago(self.snap.fetched_at.as_deref());
         let pane = self.focus.pane().title();
+        let alerts = if self.notify_enabled { "on" } else { "off" };
         format!(
-            " q r n o tab j/k · {} · focus:{} · v{} ",
+            " q quit · r refresh · n feed · t alerts · o open · tab next · j/k scroll · {} · {} · alerts:{alerts} · v{} ",
             updated,
             pane,
             env!("CARGO_PKG_VERSION"),
@@ -575,8 +635,9 @@ impl App {
             .map(|s| ago(Some(s)))
             .unwrap_or_else(|| "—".into());
         format!(
-            "ANNOUNCE FEED · @{} · last {last}",
-            self.feed_mode.label(&self.cfg)
+            "ANNOUNCE FEED · @{} · updated {}s · last {last}",
+            self.feed_mode.label(&self.cfg),
+            self.last_feed.elapsed().as_secs(),
         )
     }
 
@@ -773,6 +834,50 @@ fn open_url_in_browser(url: &str) -> Result<()> {
     }
 }
 
+/// Record tweet ids we've already announced; return indices of genuinely new
+/// tweets. Until the seen-set is seeded (first fetch) nothing counts as new,
+/// so a fresh run doesn't replay the whole feed as notifications.
+fn mark_new_tweets(seen: &mut HashSet<String>, tweets: &[Tweet], seeded: bool) -> Vec<usize> {
+    let mut fresh = Vec::new();
+    for (i, t) in tweets.iter().enumerate() {
+        if t.id.is_empty() || t.id == "unknown" {
+            continue;
+        }
+        if seen.insert(t.id.clone()) && seeded {
+            fresh.push(i);
+        }
+    }
+    fresh
+}
+
+/// Fire a desktop notification: macOS Notification Center via `osascript`,
+/// Linux via `notify-send`. Same platform-branch style as `open_url_in_browser`.
+fn notify_desktop(title: &str, body: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        // AppleScript string literals: escape backslash first, then quotes.
+        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!(
+            "display notification \"{}\" with title \"{}\" sound name \"Glass\"",
+            esc(body),
+            esc(title)
+        );
+        Command::new("osascript").arg("-e").arg(script).spawn()?;
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("notify-send").arg(title).arg(body).spawn()?;
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        // Windows: PowerShell toast — TODO when the app gains Windows support.
+        let _ = (title, body);
+        return Ok(());
+    }
+}
+
 /// Prefer stored tweet URL; fall back to `x.com/{handle}/status/{id}`.
 /// Nitter hosts are rewritten to x.com for a usable browser link.
 fn tweet_view_url(t: &Tweet) -> Option<String> {
@@ -851,6 +956,14 @@ pub async fn run_tui(cfg: Config) -> Result<()> {
                         // refresh @blknoiz06 announce only (no inference alt handle)
                         app.set_scroll(PaneId::Announce, 0);
                         app.refresh_feed().await;
+                    }
+                    KeyCode::Char('t') => {
+                        // Toggle desktop notifications (env sets initial state).
+                        app.notify_enabled = !app.notify_enabled;
+                        app.status = format!(
+                            "notifications {}",
+                            if app.notify_enabled { "on" } else { "off" }
+                        );
                     }
                     KeyCode::Tab => {
                         app.focus = app.focus.next();
@@ -958,6 +1071,51 @@ pub async fn run_tui(cfg: Config) -> Result<()> {
     )?;
     terminal.show_cursor()?;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tweet(id: &str) -> Tweet {
+        Tweet {
+            id: id.into(),
+            text: "test".into(),
+            created_at: None,
+            url: String::new(),
+            handle: Some("blknoiz06".into()),
+            retweet: false,
+            retweet_of: None,
+            quote_author: None,
+        }
+    }
+
+    #[test]
+    fn first_fetch_seeds_without_notifying() {
+        let mut seen = HashSet::new();
+        let tweets = vec![tweet("1"), tweet("2")];
+        let fresh = mark_new_tweets(&mut seen, &tweets, false);
+        assert!(fresh.is_empty());
+        assert_eq!(seen.len(), 2);
+    }
+
+    #[test]
+    fn new_tweet_after_seed_is_reported() {
+        let mut seen = HashSet::new();
+        let tweets = vec![tweet("1")];
+        mark_new_tweets(&mut seen, &tweets, false);
+        let tweets = vec![tweet("2"), tweet("1")];
+        let fresh = mark_new_tweets(&mut seen, &tweets, true);
+        assert_eq!(fresh, vec![0]);
+    }
+
+    #[test]
+    fn unknown_ids_never_notify() {
+        let mut seen = HashSet::new();
+        let tweets = vec![tweet(""), tweet("unknown"), tweet("real")];
+        let fresh = mark_new_tweets(&mut seen, &tweets, true);
+        assert_eq!(fresh, vec![2]);
+    }
 }
 
 

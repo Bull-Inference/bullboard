@@ -426,6 +426,32 @@ fn clean_tweet_text(raw: &str) -> String {
     t.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// `https://nitter.net/{author}/status/{id}` → the author segment.
+fn author_from_link(link: &str) -> Option<String> {
+    let st = link.find("/status/")?;
+    let proto = link.find("://").map(|i| i + 3).unwrap_or(0);
+    let slash = link[proto..].find('/').map(|i| i + proto).unwrap_or(0);
+    if st > slash {
+        Some(link[slash + 1..st].to_string())
+    } else {
+        None
+    }
+}
+
+/// Quote retweets embed `Name (@handle)` inside a <blockquote> — grab the handle.
+fn quoted_author(desc: &str) -> Option<String> {
+    let bq = desc.find("<blockquote>")?;
+    let at = desc[bq..].find("(@")? + bq;
+    let rest = &desc[at + 2..];
+    let end = rest.find(')')?;
+    let h = &rest[..end];
+    if h.is_empty() {
+        None
+    } else {
+        Some(h.to_string())
+    }
+}
+
 fn parse_rss(xml: &str, handle: &str) -> Vec<Tweet> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -460,6 +486,13 @@ fn parse_rss(xml: &str, handle: &str) -> Vec<Tweet> {
                     if text.is_empty() {
                         continue;
                     }
+                    let retweet = title.starts_with("RT by ");
+                    let retweet_of = if retweet {
+                        author_from_link(&link)
+                    } else {
+                        None
+                    };
+                    let quote_author = quoted_author(&desc);
                     let id = link
                         .rsplit("/status/")
                         .next()
@@ -487,6 +520,9 @@ fn parse_rss(xml: &str, handle: &str) -> Vec<Tweet> {
                         created_at: created,
                         url,
                         handle: Some(handle.to_string()),
+                        retweet,
+                        retweet_of,
+                        quote_author,
                     });
                 }
                 cur_tag.clear();
@@ -501,6 +537,17 @@ fn parse_rss(xml: &str, handle: &str) -> Vec<Tweet> {
                     "description" => desc.push_str(&text),
                     "link" => link.push_str(&text),
                     "pubDate" => pub_date.push_str(&text),
+                    _ => {}
+                }
+            }
+            // Nitter wraps description in <![CDATA[...]]> — treat it as text.
+            Ok(Event::CData(t)) => {
+                if !in_item {
+                    continue;
+                }
+                let text = String::from_utf8_lossy(t.as_ref()).to_string();
+                match cur_tag.as_str() {
+                    "description" => desc.push_str(&text),
                     _ => {}
                 }
             }
@@ -523,6 +570,13 @@ pub async fn fetch_tweets(
         let url = format!("{base}/{handle}/rss");
         match get_text(client, &url).await {
             Ok(xml) => {
+                // Nitter serves block / rate-limit pages as HTTP 200 HTML —
+                // treat anything that isn't RSS-shaped as a mirror failure.
+                let trimmed = xml.trim_start();
+                if !(trimmed.starts_with("<?xml") || trimmed.starts_with("<rss")) {
+                    errors.push(format!("{base}: not an rss feed"));
+                    continue;
+                }
                 let mut tweets = parse_rss(&xml, handle);
                 // Newest first — created_at is ISO-8601 UTC, so string cmp is chronological.
                 // Sort before truncating so the newest `limit` survive regardless of feed order.
@@ -581,4 +635,49 @@ pub async fn once_json(cfg: &Config) -> Result<String> {
         "errors": snap.errors,
     });
     Ok(serde_json::to_string_pretty(&out)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fixture mirroring Nitter's structure: plain post, retweet, quote retweet.
+    fn feed() -> String {
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <item>
+    <title>a normal post</title>
+    <description><![CDATA[<p>just a post</p>]]></description>
+    <link>https://nitter.net/blknoiz06/status/1#m</link>
+    <pubDate>Mon, 10 Aug 2026 12:00:00 GMT</pubDate>
+  </item>
+  <item>
+    <title>RT by @blknoiz06: retweeted content</title>
+    <description><![CDATA[<p>retweeted content</p>]]></description>
+    <link>https://nitter.net/DokuroSOL/status/2#m</link>
+    <pubDate>Mon, 10 Aug 2026 12:01:00 GMT</pubDate>
+  </item>
+  <item>
+    <title>a quote</title>
+    <description><![CDATA[<p>my comment</p><hr/><blockquote><b>Kaiz 🐂🀄️ (@Kaiz_294)</b><p>quoted</p></blockquote>]]></description>
+    <link>https://nitter.net/blknoiz06/status/3#m</link>
+    <pubDate>Mon, 10 Aug 2026 12:02:00 GMT</pubDate>
+  </item>
+</channel></rss>"#
+        .to_string()
+    }
+
+    #[test]
+    fn tags_retweets_and_quotes() {
+        let ts = parse_rss(&feed(), "blknoiz06");
+        assert_eq!(ts.len(), 3);
+        assert!(!ts[0].retweet);
+        assert!(ts[0].retweet_of.is_none());
+        assert!(ts[0].quote_author.is_none());
+        assert!(ts[1].retweet);
+        assert_eq!(ts[1].retweet_of.as_deref(), Some("DokuroSOL"));
+        assert_eq!(ts[1].text, "retweeted content");
+        assert!(!ts[2].retweet);
+        assert_eq!(ts[2].quote_author.as_deref(), Some("Kaiz_294"));
+    }
 }

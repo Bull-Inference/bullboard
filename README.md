@@ -4,7 +4,7 @@
 
 **Surfboard-style Rust TUI for Bull.inf** — stalk `$ANSEM` and `@blknoiz06` from your shell.
 
-![version](https://img.shields.io/badge/version-0.3.2-0a0b09?style=for-the-badge&labelColor=1b1f16)
+![version](https://img.shields.io/badge/version-0.3.3-0a0b09?style=for-the-badge&labelColor=1b1f16)
 ![license](https://img.shields.io/badge/license-MIT-0a0b09?style=for-the-badge&labelColor=1b1f16)
 ![rust](https://img.shields.io/badge/rust-2021_edition-0a0b09?style=for-the-badge&labelColor=1b1f16&logo=rust&logoColor=c8f542)
 ![tui](https://img.shields.io/badge/built_with-ratatui-0a0b09?style=for-the-badge&labelColor=1b1f16)
@@ -26,7 +26,8 @@
 - **Signals & activity** — health signals, DEX flow, and the Bull.inf inference feed
 - **Mouse-first interaction** — hover highlighting, click-to-focus, wheel-to-scroll
 - **Keyboard-driven** — tab-focus panes, jump with `1`–`9`, scroll with `j/k`, open tweets with `o`
-- **Auto-refresh** — data every 15s, feed every 60s; a failing endpoint shows `—`, never crashes
+- **Auto-refresh** — data every 15s, feed every 30s; a failing endpoint shows `—`, never crashes
+- **Desktop alerts** — opt-in notification when `@blknoiz06` posts (macOS Notification Center / Linux `notify-send`); `t` toggles it live
 
 ## 🚀 Install
 
@@ -70,6 +71,7 @@ bullboard --handle blknoiz06 # override the announce feed handle
 | `q` / `Esc` | quit |
 | `r` | force refresh all |
 | `n` | refresh announce feed (`@blknoiz06`) |
+| `t` | toggle desktop notifications (initial state from `BULLBOARD_NOTIFY`) |
 | `Tab` / `Shift+Tab` | focus next / prev pane |
 | `↑↓` / `j k` | scroll focused pane |
 | `PgUp` / `PgDn` · `f` / `b` · `Space` | scroll faster |
@@ -86,6 +88,7 @@ bullboard --handle blknoiz06 # override the announce feed handle
 | `BULLBOARD_API_BASE` | `https://api.bullinf.fun` |
 | `BULLBOARD_X_HANDLE` | `blknoiz06` |
 | `BULLBOARD_MINT` | ANSEM mint |
+| `BULLBOARD_NOTIFY` | `1` — desktop notifications on at launch (default off; toggle anytime with `t`) |
 
 ## 📡 Data (public, no keys)
 

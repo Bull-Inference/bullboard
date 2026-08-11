@@ -1,4 +1,4 @@
-use crate::config::{Config, FeedMode, NITTER_BASES};
+use crate::config::{Config, FeedMode};
 use crate::model::{DexPair, RiskFlag, Snapshot, Token, TopHolder, Tweet, WindowStats};
 use anyhow::Result;
 use chrono::Utc;
@@ -597,6 +597,111 @@ fn newest_created(ts: &[Tweet]) -> Option<&str> {
     ts.iter().filter_map(|t| t.created_at.as_deref()).max()
 }
 
+/// Circuit-breaker cooldowns for the announce feed.
+const TRIP_THRESHOLD: u32 = 3; // polls where every attempt failed before tripping
+const TRIP_COOLDOWN_SECS: u64 = 300; // 5 min skip after tripping
+const FRESH_THRESHOLD: u32 = 3; // fresh-only failures before downgrading
+const FRESH_COOLDOWN_SECS: u64 = 1800; // 30 min plain-only after fresh blocks
+
+/// How a mirror should be probed this poll, decided by its circuit breaker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MirrorPlan {
+    /// Try the fresh live-fetch URL, then the plain cached URL.
+    Full,
+    /// Fresh fetches kept failing — use only the plain cached URL.
+    PlainOnly,
+    /// Mirror tripped — skip it for the cooldown period.
+    Skip,
+}
+
+/// Auto-healing for flaky mirrors: a mirror that fails every attempt for
+/// `TRIP_THRESHOLD` polls in a row is skipped for `TRIP_COOLDOWN_SECS`
+/// instead of being hammered; a mirror that blocks the fresh-cursor bypass
+/// (but still serves cached RSS) is downgraded to plain requests for
+/// `FRESH_COOLDOWN_SECS`, then probed fresh again.
+#[derive(Clone, Debug, Default)]
+pub struct MirrorHealth {
+    trip_streak: u32,
+    fresh_streak: u32,
+    trip_until: Option<u64>,
+    fresh_until: Option<u64>,
+}
+
+impl MirrorHealth {
+    fn plan(&self, now: u64) -> MirrorPlan {
+        if self.trip_until.is_some_and(|t| now < t) {
+            MirrorPlan::Skip
+        } else if self.fresh_until.is_some_and(|t| now < t) {
+            MirrorPlan::PlainOnly
+        } else {
+            MirrorPlan::Full
+        }
+    }
+
+    fn observe(&mut self, fresh_tried: bool, ok: bool, fresh_ok: bool, now: u64) {
+        if !ok {
+            // Every allowed attempt failed this poll.
+            self.trip_streak += 1;
+            self.fresh_streak = 0;
+            if self.trip_streak >= TRIP_THRESHOLD {
+                self.trip_until = Some(now + TRIP_COOLDOWN_SECS);
+            }
+            return;
+        }
+        self.trip_streak = 0;
+        if !fresh_tried {
+            return; // plain-only poll — nothing new to learn about fresh
+        }
+        if fresh_ok {
+            self.fresh_streak = 0;
+            self.fresh_until = None;
+        } else {
+            self.fresh_streak += 1;
+            if self.fresh_streak >= FRESH_THRESHOLD {
+                self.fresh_until = Some(now + FRESH_COOLDOWN_SECS);
+            }
+        }
+    }
+}
+
+/// Breaker state for every mirror in the feed, owned by the app so tripped
+/// mirrors stay skipped across polls (and recover once the cooldown passes).
+#[derive(Clone, Debug, Default)]
+pub struct FeedHealth {
+    mirrors: HashMap<String, MirrorHealth>,
+}
+
+impl FeedHealth {
+    pub fn plan_mirror(&self, mirror: &str) -> MirrorPlan {
+        let now = Utc::now().timestamp() as u64;
+        self.mirrors
+            .get(mirror)
+            .map_or(MirrorPlan::Full, |h| h.plan(now))
+    }
+
+    pub fn observe_result(&mut self, mirror: &str, fresh_tried: bool, ok: bool, fresh_ok: bool) {
+        let now = Utc::now().timestamp() as u64;
+        self.mirrors
+            .entry(mirror.into())
+            .or_default()
+            .observe(fresh_tried, ok, fresh_ok, now);
+    }
+
+    /// Mirrors not currently tripped — shown in the pane title when degraded.
+    pub fn live_mirrors(&self, mirrors: &[String]) -> usize {
+        let now = Utc::now().timestamp() as u64;
+        mirrors
+            .iter()
+            .filter(|m| {
+                !self
+                    .mirrors
+                    .get(*m)
+                    .is_some_and(|h| h.plan(now) == MirrorPlan::Skip)
+            })
+            .count()
+    }
+}
+
 /// Choose the best mirror result: the freshest feed wins; ties go to the
 /// earliest mirror. Errors are reported only when every mirror failed.
 fn pick_best_feed(results: Vec<(usize, Result<Vec<Tweet>, String>)>) -> (Vec<Tweet>, Option<String>) {
@@ -642,30 +747,42 @@ pub async fn fetch_tweets(
     handle: &str,
     limit: usize,
     fresh: bool,
+    mirrors: &[String],
+    health: &mut FeedHealth,
 ) -> (Vec<Tweet>, Option<String>) {
     // Probe every mirror concurrently so one slow mirror can't stall the feed
     // (a sequential fallback could stack three 12s timeouts per refresh).
     // Each mirror: fresh URL first (live fetch), plain URL as a fallback for
-    // mirrors running older Nitter that ignores `cursor`.
+    // mirrors running older Nitter that ignores `cursor`. Tripped mirrors are
+    // skipped entirely until their circuit-breaker cooldown expires.
     let nonce = fresh.then(fresh_cursor);
     let mut tasks = Vec::new();
-    for base in NITTER_BASES {
+    let mut probes: Vec<(String, MirrorPlan)> = Vec::new();
+    for base in mirrors {
+        let plan = health.plan_mirror(base);
+        if plan == MirrorPlan::Skip {
+            continue;
+        }
         let c = client.clone();
-        let b = (*base).to_string();
+        let b = base.clone();
         let h = handle.to_string();
         let n = nonce.clone();
+        let fresh_tried = fresh && plan == MirrorPlan::Full;
+        probes.push((b.clone(), plan));
         tasks.push(tokio::spawn(async move {
             let mut errs = Vec::new();
-            let fresh_url = rss_url(&b, &h, n.as_deref());
-            match get_text(&c, &fresh_url).await {
-                Ok(xml) if is_rss(&xml) => return Ok(parse_feed(&xml, &h, limit)),
-                Ok(_) => errs.push(format!("{b}: not an rss feed (fresh)")),
-                Err(e) => errs.push(format!("{b}: {e} (fresh)")),
+            if fresh_tried {
+                let fresh_url = rss_url(&b, &h, n.as_deref());
+                match get_text(&c, &fresh_url).await {
+                    Ok(xml) if is_rss(&xml) => return Ok((true, parse_feed(&xml, &h, limit))),
+                    Ok(_) => errs.push(format!("{b}: not an rss feed (fresh)")),
+                    Err(e) => errs.push(format!("{b}: {e} (fresh)")),
+                }
             }
             // A stale-but-present feed still beats nothing.
             let plain_url = rss_url(&b, &h, None);
             match get_text(&c, &plain_url).await {
-                Ok(xml) if is_rss(&xml) => return Ok(parse_feed(&xml, &h, limit)),
+                Ok(xml) if is_rss(&xml) => return Ok((false, parse_feed(&xml, &h, limit))),
                 Ok(_) => errs.push(format!("{b}: not an rss feed")),
                 Err(e) => errs.push(format!("{b}: {e}")),
             }
@@ -673,12 +790,32 @@ pub async fn fetch_tweets(
         }));
     }
 
+    if tasks.is_empty() {
+        return (
+            Vec::new(),
+            Some("all mirrors tripped — cooling down".into()),
+        );
+    }
+
     let mut results = Vec::with_capacity(tasks.len());
     for (i, t) in tasks.into_iter().enumerate() {
-        results.push((i, match t.await {
-            Ok(r) => r,
-            Err(e) => Err(format!("mirror task: {e}")),
-        }));
+        let (mirror, plan) = &probes[i];
+        let fresh_tried = fresh && *plan == MirrorPlan::Full;
+        let outcome = match t.await {
+            Ok(Ok((fresh_ok, ts))) => {
+                health.observe_result(mirror, fresh_tried, true, fresh_ok);
+                Ok(ts)
+            }
+            Ok(Err(e)) => {
+                health.observe_result(mirror, fresh_tried, false, false);
+                Err(e)
+            }
+            Err(e) => {
+                health.observe_result(mirror, fresh_tried, false, false);
+                Err(format!("mirror task: {e}"))
+            }
+        };
+        results.push((i, outcome));
     }
     pick_best_feed(results)
 }
@@ -688,14 +825,16 @@ pub async fn fetch_announce(
     cfg: &Config,
     _mode: FeedMode,
     limit: usize,
+    health: &mut FeedHealth,
 ) -> (Vec<Tweet>, Option<String>) {
-    fetch_tweets(client, &cfg.x_handle, limit, cfg.fresh_feed).await
+    fetch_tweets(client, &cfg.x_handle, limit, cfg.fresh_feed, &cfg.mirrors, health).await
 }
 
 pub async fn once_json(cfg: &Config) -> Result<String> {
     let client = http_client()?;
     let mut snap = fetch_snapshot(&client, cfg).await;
-    let (tweets, terr) = fetch_announce(&client, cfg, FeedMode::Primary, 12).await;
+    let mut health = FeedHealth::default();
+    let (tweets, terr) = fetch_announce(&client, cfg, FeedMode::Primary, 12, &mut health).await;
     snap.tweets = tweets;
     snap.tweet_error = terr;
     let t = &snap.token;
@@ -831,5 +970,51 @@ mod tests {
         ]);
         assert_eq!(ts[0].id, "1");
         assert!(err.is_none());
+    }
+
+    #[test]
+    fn breaker_trips_after_repeated_failures_and_recovers() {
+        let mut h = MirrorHealth::default();
+        for _ in 0..TRIP_THRESHOLD {
+            h.observe(true, false, false, 1000);
+        }
+        assert_eq!(h.plan(1001), MirrorPlan::Skip);
+        assert_eq!(h.plan(1000 + TRIP_COOLDOWN_SECS + 1), MirrorPlan::Full);
+    }
+
+    #[test]
+    fn breaker_downgrades_mirror_that_blocks_fresh() {
+        let mut h = MirrorHealth::default();
+        for _ in 0..FRESH_THRESHOLD {
+            h.observe(true, true, false, 1000); // fresh fails, plain serves
+        }
+        assert_eq!(h.plan(1001), MirrorPlan::PlainOnly);
+        h.observe(false, true, false, 1001); // plain-only poll stays healthy
+        assert_eq!(h.plan(1002), MirrorPlan::PlainOnly);
+        // Fresh is probed again once the cooldown passes.
+        assert_eq!(
+            h.plan(1000 + FRESH_COOLDOWN_SECS + 1),
+            MirrorPlan::Full
+        );
+    }
+
+    #[test]
+    fn breaker_fresh_success_resets_streaks() {
+        let mut h = MirrorHealth::default();
+        h.observe(true, true, false, 1000);
+        h.observe(true, true, false, 1001);
+        assert_eq!(h.plan(1002), MirrorPlan::Full); // under threshold
+        h.observe(true, true, true, 1002); // fresh works again
+        h.observe(true, true, false, 1003); // then flips again — no stale downgrade
+        assert_eq!(h.plan(1004), MirrorPlan::Full);
+    }
+
+    #[test]
+    fn breaker_fresh_only_failures_never_trip_mirror() {
+        let mut h = MirrorHealth::default();
+        for _ in 0..10 {
+            h.observe(true, true, false, 1000); // plain ok every time
+        }
+        assert_ne!(h.plan(1001), MirrorPlan::Skip);
     }
 }

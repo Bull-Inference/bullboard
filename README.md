@@ -91,6 +91,7 @@ bullboard --handle blknoiz06 # override the announce feed handle
 | `BULLBOARD_NOTIFY` | `1` — desktop notifications on at launch (default off; toggle anytime with `t`) |
 | `BULLBOARD_FRESH_FEED` | `1` — bypass the mirrors' 10-minute RSS cache: every poll triggers a live fetch, so tweets land within ~30s of posting (set `0` for polite cached mode) |
 | `BULLBOARD_FEED_SECS` | `30` — announce feed poll interval in seconds (min 5) |
+| `BULLBOARD_MIRRORS` | `https://nitter.net,...` — comma-separated Nitter mirrors; mirrors that keep failing are auto-skipped for 5 min, so swapping in a fresh instance is just an env change |
 
 ## 📡 Data (public, no keys)
 

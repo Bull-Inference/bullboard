@@ -38,6 +38,9 @@ pub struct Config {
     pub fresh_feed: bool,
     /// Announce feed poll interval in seconds (BULLBOARD_FEED_SECS).
     pub feed_secs: u64,
+    /// Nitter mirrors for the announce feed (BULLBOARD_MIRRORS,
+    /// comma-separated — no recompile needed when one starts blocking).
+    pub mirrors: Vec<String>,
 }
 
 impl Config {
@@ -60,6 +63,17 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .map(|s: u64| s.max(5))
                 .unwrap_or(REFRESH_FEED_SECS),
+            mirrors: env::var("BULLBOARD_MIRRORS")
+                .ok()
+                .map(|s| {
+                    s.split(',')
+                        .map(str::trim)
+                        .filter(|m| !m.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|v: &Vec<String>| !v.is_empty())
+                .unwrap_or_else(|| NITTER_BASES.iter().map(|s| s.to_string()).collect()),
         }
     }
 }

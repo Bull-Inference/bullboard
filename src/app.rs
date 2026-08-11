@@ -1,5 +1,5 @@
 use crate::config::{Config, FeedMode, REFRESH_DATA_SECS};
-use crate::fetch::{fetch_announce, fetch_snapshot, http_client};
+use crate::fetch::{fetch_announce, fetch_snapshot, http_client, FeedHealth};
 use crate::format::{
     ago, bar, clock_mmdd_hhmm, delta_str, fmt_compact, fmt_int, fmt_usd, short_addr, sparkline,
 };
@@ -51,6 +51,8 @@ pub struct App {
     pub status: String,
     /// Desktop notifications on (`t` toggles; BULLBOARD_NOTIFY sets initial).
     pub notify_enabled: bool,
+    /// Circuit-breaker state per feed mirror (auto-skips blocking mirrors).
+    pub feed_health: FeedHealth,
     last_data: Instant,
     last_feed: Instant,
     /// Tweet ids already announced; a new id fires a desktop notification.
@@ -75,6 +77,7 @@ impl App {
             should_quit: false,
             status: "loading…".into(),
             notify_enabled: notify,
+            feed_health: FeedHealth::default(),
             last_data: Instant::now() - Duration::from_secs(999),
             last_feed: Instant::now() - Duration::from_secs(999),
             seen_tweets: HashSet::new(),
@@ -198,7 +201,8 @@ impl App {
 
     pub async fn refresh_feed(&mut self) {
         let (tweets, err) =
-            fetch_announce(&self.client, &self.cfg, self.feed_mode, 40).await;
+            fetch_announce(&self.client, &self.cfg, self.feed_mode, 40, &mut self.feed_health)
+                .await;
         // Nitter mirrors are flaky: if a poll comes back empty with an error,
         // keep the last good feed so the pane never blanks on a hiccup.
         if tweets.is_empty() && err.is_some() && !self.snap.tweets.is_empty() {
@@ -669,8 +673,16 @@ impl App {
             .and_then(|t| t.created_at.as_deref())
             .map(|s| ago(Some(s)))
             .unwrap_or_else(|| "—".into());
+        // Degraded mirror health shows up in the title instead of hiding.
+        let live = self.feed_health.live_mirrors(&self.cfg.mirrors);
+        let total = self.cfg.mirrors.len();
+        let mirrors = if live < total {
+            format!(" · mirrors {live}/{total}")
+        } else {
+            String::new()
+        };
         format!(
-            "ANNOUNCE FEED · @{} · updated {}s · last {last}",
+            "ANNOUNCE FEED · @{} · updated {}s · last {last}{mirrors}",
             self.feed_mode.label(&self.cfg),
             self.last_feed.elapsed().as_secs(),
         )

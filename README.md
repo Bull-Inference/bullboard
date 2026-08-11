@@ -60,7 +60,7 @@ Nine panes on one screen — price and 24h change up top, then:
 
 | Pane | What it tells you |
 |------|-------------------|
-| PRICE · LIQUIDITY · SAFETY · SUPPLY | The four top cards: price + volume with a Gecko cross-check (amber `(!)` when sources disagree), liquidity with the pair it quotes, contract safety (mint/freeze/rug score/insiders/LP lock), and supply + FDV |
+| PRICE · LIQUIDITY · SAFETY · SUPPLY | The four top cards: price + volume with a Gecko cross-check (amber `(!)` when sources disagree), total liquidity across every pool with RugCheck + Gecko cross-checks, contract safety (mint/freeze/rug score/insiders/LP lock), and supply + FDV |
 | **Announce feed** | `@blknoiz06`'s tweets, newest first — click or press `o` to open one |
 | Signals | Plain-English health checks: is liquidity deep? are top holders concentrated? is the dev wallet holding too much? |
 | Activity | Buy/sell volume per window, organic vs. net buyers, DEX pair flow with pool age, and a Gecko cross-check on liquidity |

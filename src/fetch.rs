@@ -190,7 +190,6 @@ fn parse_dex_pairs(raw: Result<Value, String>, errors: &mut HashMap<String, Stri
             .to_string();
         pairs.push(DexPair {
             dex_id: json_str(&p, "dexId").unwrap_or_else(|| "?".into()),
-            pair_address: json_str(&p, "pairAddress").unwrap_or_default(),
             price_usd: json_f(&p, "priceUsd").or_else(|| {
                 p.get("priceUsd")
                     .and_then(|x| x.as_str())
@@ -205,7 +204,6 @@ fn parse_dex_pairs(raw: Result<Value, String>, errors: &mut HashMap<String, Stri
             quote_symbol: quote,
             fdv: json_f(&p, "fdv"),
             mcap: json_f(&p, "marketCap"),
-            pair_created_ms: json_u(&p, "pairCreatedAt"),
         });
     }
     pairs.sort_by(|a, b| {
@@ -225,7 +223,6 @@ fn parse_token(
     errors: &mut HashMap<String, String>,
 ) -> Token {
     let mut t = Token {
-        mint: mint.to_string(),
         name: "The Black Bull".into(),
         symbol: "ANSEM".into(),
         ..Default::default()
@@ -962,7 +959,7 @@ pub async fn once_json(cfg: &Config) -> Result<String> {
             "fdv": t.fdv,
             "circ_supply": t.circ_supply,
             "total_supply": t.total_supply,
-            "liquidity": t.liquidity,
+            "liquidity": t.total_liquidity(),
             "vol_24h": t.stats_24h.buy_volume.zip(t.stats_24h.sell_volume).map(|(b,s)| b+s)
                 .or_else(|| t.primary_pair.as_ref().and_then(|p| p.vol_h24)),
             "buys_24h": t.stats_24h.buys,

@@ -59,7 +59,6 @@ impl WindowStats {
 #[derive(Clone, Debug, Default)]
 pub struct DexPair {
     pub dex_id: String,
-    pub pair_address: String,
     pub price_usd: Option<f64>,
     pub change_m5: Option<f64>,
     pub change_h1: Option<f64>,
@@ -71,7 +70,6 @@ pub struct DexPair {
     pub quote_symbol: String,
     pub fdv: Option<f64>,
     pub mcap: Option<f64>,
-    pub pair_created_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -104,7 +102,6 @@ pub struct GeckoPool {
 /// Aggregated $ANSEM on-chain / market intelligence.
 #[derive(Clone, Debug, Default)]
 pub struct Token {
-    pub mint: String,
     pub name: String,
     pub symbol: String,
     pub price_usd: Option<f64>,

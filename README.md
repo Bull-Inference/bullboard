@@ -4,7 +4,11 @@ Surfboard-style **Rust TUI** for **Bull.inf** — stalk **$ANSEM** and **@blknoi
 
 Multi-pane dashboard with **scrollable sections** (ratatui). Hero-first KPI cards, colored `POST` badges, dual sparklines, holder distribution, audit signals. Tab-focus a pane, then `j/k` / arrows / mouse wheel to scroll.
 
-**v0.3** visual polish pass — closer to MAXPANE / Surfboard hierarchy.
+<p align="center">
+  <img src="docs/bullboard.png" alt="bullboard — Surfboard-style TUI for $ANSEM / @blknoiz06" width="100%">
+</p>
+
+**v0.3.2** visual polish pass — closer to MAXPANE / Surfboard hierarchy.
 
 ```
 BULLBOARD · $ANSEM · @blknoiz06 · feed · activity

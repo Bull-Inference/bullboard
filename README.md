@@ -11,7 +11,7 @@
 ![solana](https://img.shields.io/badge/solana-%24ANSEM-0a0b09?style=for-the-badge&labelColor=1b1f16&logo=solana&logoColor=c8f542)
 ![x](https://img.shields.io/badge/x-%40blknoiz06-0a0b09?style=for-the-badge&labelColor=1b1f16&logo=x&logoColor=c8f542)
 
-<img src="docs/bullboard.png" alt="bullboard — Surfboard-style TUI for $ANSEM / @blknoiz06" width="100%" />
+<img src="docs/bullboard.png" alt="bullboard running — live terminal dashboard for $ANSEM / @blknoiz06" width="100%" />
 
 </div>
 

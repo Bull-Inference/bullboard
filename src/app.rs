@@ -44,13 +44,12 @@ enum RefreshMsg {
 
 /// The data endpoints `snap.errors` is keyed by — drives the `src n/m` health
 /// counter in the header.
-const SOURCE_KEYS: [&str; 8] = [
+const SOURCE_KEYS: [&str; 7] = [
     "price",
     "ohlc",
     "jupiter",
     "gecko",
     "gecko-token",
-    "gecko-pools",
     "rugcheck",
     "dexscreener",
 ];
@@ -93,6 +92,8 @@ pub struct App {
     last_feed: Instant,
     /// Tweet ids already announced; a new id fires a desktop notification.
     seen_tweets: HashSet<String>,
+    /// Cached pane lines; `None` after `RefreshMsg`.
+    line_cache: Option<Box<[Vec<String>]>>,
 }
 
 impl App {
@@ -122,7 +123,46 @@ impl App {
             last_data: Instant::now() - Duration::from_secs(999),
             last_feed: Instant::now() - Duration::from_secs(999),
             seen_tweets: HashSet::new(),
+            line_cache: None,
         }
+    }
+
+    const fn pane_idx(id: PaneId) -> usize {
+        match id {
+            PaneId::Gate => 0,
+            PaneId::Treasury => 1,
+            PaneId::Stake => 2,
+            PaneId::Mcap => 3,
+            PaneId::Announce => 4,
+            PaneId::Signals => 5,
+            PaneId::Activity => 6,
+            PaneId::Market => 7,
+            PaneId::Holders => 8,
+        }
+    }
+
+    const LINE_BUILDERS: [fn(&App) -> Vec<String>; NUM_PANES] = [
+        App::lines_price_flow,
+        App::lines_primary_lp,
+        App::lines_audit,
+        App::lines_supply,
+        App::lines_announce,
+        App::lines_signals,
+        App::lines_activity,
+        App::lines_market,
+        App::lines_holders,
+    ];
+
+    fn ensure_line_cache(&mut self) {
+        if self.line_cache.is_some() {
+            return;
+        }
+        let cache: Box<[Vec<String>]> = Self::LINE_BUILDERS
+            .iter()
+            .map(|build| build(self))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        self.line_cache = Some(cache);
     }
 
     pub fn scroll_of(&self, id: PaneId) -> u16 {
@@ -145,14 +185,7 @@ impl App {
         }
         lines
             .iter()
-            .map(|l| {
-                let chars = l.chars().count();
-                if chars == 0 {
-                    1
-                } else {
-                    chars.div_ceil(content_w).max(1)
-                }
-            })
+            .map(|l| Self::announce_line_height(l, content_w))
             .sum()
     }
 
@@ -265,6 +298,7 @@ impl App {
 
     /// Apply one background refresh result (called every tick while queued).
     fn handle_msg(&mut self, msg: RefreshMsg) {
+        self.line_cache = None;
         match msg {
             RefreshMsg::Data(boxed) => {
                 let old = std::mem::take(&mut self.snap);
@@ -324,16 +358,17 @@ impl App {
     }
 
     pub fn lines_for(&self, id: PaneId) -> Vec<String> {
-        match id {
-            PaneId::Gate => self.lines_price_flow(),
-            PaneId::Treasury => self.lines_primary_lp(),
-            PaneId::Stake => self.lines_audit(),
-            PaneId::Mcap => self.lines_supply(),
-            PaneId::Announce => self.lines_announce(),
-            PaneId::Signals => self.lines_signals(),
-            PaneId::Activity => self.lines_activity(),
-            PaneId::Market => self.lines_market(),
-            PaneId::Holders => self.lines_holders(),
+        if let Some(cache) = &self.line_cache {
+            return cache[Self::pane_idx(id)].clone();
+        }
+        Self::LINE_BUILDERS[Self::pane_idx(id)](self)
+    }
+
+    fn announce_line_height(line: &str, content_w: usize) -> usize {
+        if line.is_empty() || line == VIEW_TWEET_BTN {
+            1
+        } else {
+            line.chars().count().max(1).div_ceil(content_w).max(1)
         }
     }
 
@@ -747,9 +782,8 @@ impl App {
         if t.pairs.is_empty() {
             lines.push("no pair data".into());
         }
-        // Second-opinion liquidity from Gecko's per-pool reserves; flag it
-        // with (!) when it disagrees with DexScreener by more than 25% —
-        // Gecko's per-pool reserves are usually the real number.
+        // Second-opinion liquidity from Gecko token reserves; flag it
+        // when it disagrees with DexScreener by more than 25%.
         if let Some(g_liq) = s.gecko_liq_usd() {
             let dex_liq: f64 = t.pairs.iter().filter_map(|x| x.liq_usd).sum();
             let flag = if dex_liq > 0.0 && (g_liq - dex_liq).abs() / dex_liq > 0.25 {
@@ -758,8 +792,7 @@ impl App {
                 ""
             };
             lines.push(format!(
-                "gecko  {} pools · liq {} vol {}{flag}",
-                s.gecko_pools.len(),
+                "gecko  liq {} vol {}{flag}",
                 fmt_usd(Some(g_liq)),
                 fmt_usd(s.gecko_token.vol_24h),
             ));
@@ -1009,12 +1042,7 @@ impl App {
             if is_post_line(line) {
                 tweet_i = Some(tweet_i.map(|i| i + 1).unwrap_or(0));
             }
-            let h = if line == VIEW_TWEET_BTN {
-                1
-            } else {
-                let chars = line.chars().count().max(1);
-                chars.div_ceil(content_w).max(1)
-            };
+            let h = Self::announce_line_height(line, content_w);
             if target >= visual_at && target < visual_at + h {
                 return (tweet_i, line == VIEW_TWEET_BTN);
             }
@@ -1069,12 +1097,7 @@ impl App {
             if is_post_line(line) {
                 tweet_i = Some(tweet_i.map(|i| i + 1).unwrap_or(0));
             }
-            let h = if line == VIEW_TWEET_BTN {
-                1
-            } else {
-                let chars = line.chars().count().max(1);
-                chars.div_ceil(content_w).max(1)
-            };
+            let h = Self::announce_line_height(line, content_w);
             let line_end = visual_at + h;
             if line_end > scroll && line == VIEW_TWEET_BTN {
                 if let Some(idx) = tweet_i {
@@ -1157,7 +1180,7 @@ fn tweet_view_url(t: &Tweet) -> Option<String> {
         .filter(|h| !h.is_empty())
         .unwrap_or("i");
 
-    let raw = if !t.url.is_empty() {
+    let mut url = if !t.url.is_empty() {
         t.url.clone()
     } else if !t.id.is_empty() && t.id != "unknown" {
         format!("https://x.com/{handle}/status/{}", t.id)
@@ -1165,15 +1188,7 @@ fn tweet_view_url(t: &Tweet) -> Option<String> {
         return None;
     };
 
-    // Rewrite nitter mirrors → x.com so the link opens on the real site.
-    let mut url = raw;
-    for host in [
-        "nitter.net",
-        "nitter.privacydev.net",
-        "nitter.poast.org",
-        "nitter.1d4.us",
-        "nitter.cz",
-    ] {
+    for host in ["nitter.net", "nitter.privacydev.net", "nitter.poast.org"] {
         if url.contains(host) {
             url = url.replace(host, "x.com");
             break;
@@ -1221,6 +1236,7 @@ pub async fn run_tui(cfg: Config) -> Result<()> {
         while let Ok(msg) = app.refresh_rx.try_recv() {
             app.handle_msg(msg);
         }
+        app.ensure_line_cache();
         // Layout first so hit-tests + scroll clamps match what we paint.
         let size = terminal.size()?;
         app.pane_areas = ui::layout_panes(Rect::new(0, 0, size.width, size.height));
@@ -1421,6 +1437,15 @@ mod tests {
         let fresh = mark_new_tweets(&mut seen, &tweets, true);
         assert_eq!(fresh, vec![2]);
     }
+
+    #[test]
+    fn refresh_invalidates_line_cache() {
+        let mut app = App::new(Config::from_env(), http_client().unwrap());
+        app.ensure_line_cache();
+        assert!(app.line_cache.is_some());
+        app.handle_msg(RefreshMsg::Data(Box::new(Snapshot::default())));
+        assert!(app.line_cache.is_none());
+    }
 }
 
 
@@ -1460,6 +1485,7 @@ mod screenshot_tool {
             }
         });
 
+        app.ensure_line_cache();
         let mut terminal = Terminal::new(TestBackend::new(140, 46)).unwrap();
         terminal
             .draw(|f| crate::ui::draw(f, &app))

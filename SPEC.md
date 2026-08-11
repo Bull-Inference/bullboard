@@ -45,12 +45,13 @@ npm launcher is optional.
 |-------------|--------|
 | Price, 24h change, OHLC (sparklines, 24h high/low) | Bull.inf `GET /api/token-price` + `GET /api/token-ohlc?interval=1h&limit=48` |
 | Token details, window stats, audit | Jupiter `GET https://lite-api.jup.ag/tokens/v2/search?query={mint}` |
-| Second-opinion price / liquidity / volume / mcap | GeckoTerminal `…/tokens/{mint}` + `…/tokens/{mint}/pools` + `…/tokens/{mint}/info` (holder distribution) |
+| Second-opinion price / liquidity / volume / mcap | GeckoTerminal `…/tokens/{mint}` + `…/tokens/{mint}/info` (holder distribution). `/pools` not polled — token `total_reserve_in_usd` is the liquidity signal. |
 | Rug check, LP lock, insiders, top holders | RugCheck `GET https://api.rugcheck.xyz/v1/tokens/{mint}/report` |
 | DEX pairs (liquidity, volume, pool age, quote) | DexScreener `GET https://api.dexscreener.com/latest/dex/tokens/{mint}` |
 | Announce feed | Nitter mirrors (public RSS, fresh-cursor bypass, circuit breaker) |
 
-Resilience: every endpoint gets one retry on 5xx/429/timeout; a failed poll
+Resilience: one retry on 5xx/timeout (and on 429 for non-Gecko hosts;
+GeckoTerminal 429 is not retried — free-tier IP budget). A failed poll
 keeps the last good values (`Snapshot::merge_stale`) so the board never
 flickers `—`; the header shows a live `src n/m` health counter.
 

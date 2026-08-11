@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::model::{
-    DexPair, GeckoPool, GeckoToken, RiskFlag, Snapshot, Token, TopHolder, Tweet, WindowStats,
+    DexPair, GeckoToken, RiskFlag, Snapshot, Token, TopHolder, Tweet, WindowStats,
 };
 use anyhow::Result;
 use chrono::Utc;
@@ -18,15 +18,16 @@ pub fn http_client() -> Result<Client> {
         .build()?)
 }
 
-/// Retry once after a short pause on rate-limits, server errors, and network
-/// hiccups — the most common flaky-source failure modes. 4xx (other than 429)
-/// are real responses and are not retried.
+/// Retry once after a short pause on server errors, network hiccups, and
+/// rate-limits on non-Gecko hosts. 4xx (other than 429 on non-Gecko) are real
+/// responses and are not retried. Gecko 429 is not retried — the IP budget is
+/// already spent and a second hit within 800ms doubles free-tier pressure.
 const RETRY_DELAY: Duration = Duration::from_millis(800);
 
 async fn get_json(client: &Client, url: &str) -> Result<Value, String> {
     match fetch_json(client, url).await {
         Ok(v) => Ok(v),
-        Err(e) if retryable(&e) => {
+        Err(e) if retryable(&e, url) => {
             tokio::time::sleep(RETRY_DELAY).await;
             fetch_json(client, url).await
         }
@@ -37,7 +38,7 @@ async fn get_json(client: &Client, url: &str) -> Result<Value, String> {
 async fn get_text(client: &Client, url: &str) -> Result<String, String> {
     match fetch_text(client, url).await {
         Ok(v) => Ok(v),
-        Err(e) if retryable(&e) => {
+        Err(e) if retryable(&e, url) => {
             tokio::time::sleep(RETRY_DELAY).await;
             fetch_text(client, url).await
         }
@@ -45,10 +46,10 @@ async fn get_text(client: &Client, url: &str) -> Result<String, String> {
     }
 }
 
-fn retryable(err: &str) -> bool {
+fn retryable(err: &str, url: &str) -> bool {
     if let Some(status) = err.strip_prefix("HTTP ") {
         match status.parse::<u16>() {
-            Ok(429) => true,
+            Ok(429) => !url.contains("api.geckoterminal.com"),
             Ok(code) => code >= 500,
             Err(_) => false,
         }
@@ -403,27 +404,20 @@ fn parse_gecko_token(
     g
 }
 
-fn parse_gecko_pools(
-    raw: Result<Value, String>,
-    errors: &mut HashMap<String, String>,
-) -> Vec<GeckoPool> {
-    let v = match raw {
-        Ok(v) => v,
-        Err(e) => {
-            errors.insert("gecko-pools".into(), e);
-            return Vec::new();
-        }
-    };
-    let mut pools = Vec::new();
-    if let Some(arr) = v.get("data").and_then(|d| d.as_array()) {
-        for p in arr.iter().take(6) {
-            let attrs = p.get("attributes").cloned().unwrap_or(Value::Null);
-            pools.push(GeckoPool {
-                liq_usd: json_f(&attrs, "reserve_in_usd"),
-            });
-        }
-    }
-    pools
+/// Gecko endpoints polled each snapshot. Caps free-tier burn: `/pools` was
+/// dropped — `gecko_token.liquidity` (`total_reserve_in_usd`) already feeds
+/// `Snapshot::gecko_liq_usd`, and a third call was 429'ing the shared IP budget.
+fn gecko_fetch_specs(mint: &str) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "gecko",
+            format!("https://api.geckoterminal.com/api/v2/networks/solana/tokens/{mint}/info"),
+        ),
+        (
+            "gecko-token",
+            format!("https://api.geckoterminal.com/api/v2/networks/solana/tokens/{mint}"),
+        ),
+    ]
 }
 
 pub async fn fetch_snapshot(client: &Client, cfg: &Config) -> Snapshot {
@@ -436,7 +430,8 @@ pub async fn fetch_snapshot(client: &Client, cfg: &Config) -> Snapshot {
     };
 
     // $ANSEM token only — no inference / desk / markets feed.
-    let tasks = [
+    // Gecko: 2 endpoints × 4 polls/min = 8/min (was 12); free tier ~30/min/IP.
+    let mut tasks = vec![
         spawn("price", format!("{base}/api/token-price")),
         spawn(
             "ohlc",
@@ -447,21 +442,6 @@ pub async fn fetch_snapshot(client: &Client, cfg: &Config) -> Snapshot {
             format!("https://lite-api.jup.ag/tokens/v2/search?query={mint}"),
         ),
         spawn(
-            "gecko",
-            format!("https://api.geckoterminal.com/api/v2/networks/solana/tokens/{mint}/info"),
-        ),
-        // Second opinion sources for price / liquidity cross-checks. Gecko's
-        // free tier allows ~30 calls/min per IP; 3 endpoints × 4 polls/min
-        // stays under that, and a 429 just lands in `errors` as a "—".
-        spawn(
-            "gecko-token",
-            format!("https://api.geckoterminal.com/api/v2/networks/solana/tokens/{mint}"),
-        ),
-        spawn(
-            "gecko-pools",
-            format!("https://api.geckoterminal.com/api/v2/networks/solana/tokens/{mint}/pools?page=1"),
-        ),
-        spawn(
             "rugcheck",
             format!("https://api.rugcheck.xyz/v1/tokens/{mint}/report"),
         ),
@@ -470,6 +450,9 @@ pub async fn fetch_snapshot(client: &Client, cfg: &Config) -> Snapshot {
             format!("https://api.dexscreener.com/latest/dex/tokens/{mint}"),
         ),
     ];
+    for (name, url) in gecko_fetch_specs(&mint) {
+        tasks.push(spawn(name, url));
+    }
 
     let mut map = HashMap::new();
     for t in tasks {
@@ -490,14 +473,10 @@ pub async fn fetch_snapshot(client: &Client, cfg: &Config) -> Snapshot {
     let gecko_token = map
         .remove("gecko-token")
         .unwrap_or_else(|| Err("fetch task crashed".into()));
-    let gecko_pools = map
-        .remove("gecko-pools")
-        .unwrap_or_else(|| Err("fetch task crashed".into()));
     let rug = map.remove("rugcheck").unwrap_or_else(|| Err("fetch task crashed".into()));
     let dex = map.remove("dex").unwrap_or_else(|| Err("fetch task crashed".into()));
     snap.token = parse_token(&mint, jup, gecko, rug, dex, &mut errors);
     snap.gecko_token = parse_gecko_token(gecko_token, &mut errors);
-    snap.gecko_pools = parse_gecko_pools(gecko_pools, &mut errors);
     snap.errors = errors;
     snap.fetched_at = Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
     snap
@@ -862,8 +841,12 @@ pub async fn fetch_tweets(
     // Each mirror: fresh URL first (live fetch), plain URL as a fallback for
     // mirrors running older Nitter that ignores `cursor`. Tripped mirrors are
     // skipped entirely until their circuit-breaker cooldown expires.
+    //
+    // Cancel-on-first-fresh: when any mirror returns a non-empty fresh feed,
+    // abort the rest so wall time ≈ min(success) instead of max(all). Plain
+    // (cached) hits do not abort — a peer may still deliver a live fetch.
     let nonce = fresh.then(fresh_cursor);
-    let mut tasks = Vec::new();
+    let mut set = tokio::task::JoinSet::new();
     let mut probes: Vec<(String, MirrorPlan)> = Vec::new();
     for base in mirrors {
         let plan = health.plan_mirror(base);
@@ -875,56 +858,109 @@ pub async fn fetch_tweets(
         let h = handle.to_string();
         let n = nonce.clone();
         let fresh_tried = fresh && plan == MirrorPlan::Full;
+        let idx = probes.len();
         probes.push((b.clone(), plan));
-        tasks.push(tokio::spawn(async move {
+        set.spawn(async move {
             let mut errs = Vec::new();
             if fresh_tried {
                 let fresh_url = rss_url(&b, &h, n.as_deref());
                 match get_text(&c, &fresh_url).await {
-                    Ok(xml) if is_rss(&xml) => return Ok((true, parse_feed(&xml, &h, limit))),
+                    Ok(xml) if is_rss(&xml) => {
+                        return (idx, Ok((true, parse_feed(&xml, &h, limit))));
+                    }
                     Ok(_) => errs.push(format!("{b}: not an rss feed (fresh)")),
                     Err(e) => errs.push(format!("{b}: {e} (fresh)")),
                 }
             }
             // A stale-but-present feed still beats nothing.
             let plain_url = rss_url(&b, &h, None);
-            match get_text(&c, &plain_url).await {
-                Ok(xml) if is_rss(&xml) => return Ok((false, parse_feed(&xml, &h, limit))),
-                Ok(_) => errs.push(format!("{b}: not an rss feed")),
-                Err(e) => errs.push(format!("{b}: {e}")),
-            }
-            Err(errs.join("; "))
-        }));
+            let outcome = match get_text(&c, &plain_url).await {
+                Ok(xml) if is_rss(&xml) => Ok((false, parse_feed(&xml, &h, limit))),
+                Ok(_) => Err(format!("{b}: not an rss feed")),
+                Err(e) => Err(format!("{b}: {e}")),
+            };
+            let outcome = match outcome {
+                Ok(v) => Ok(v),
+                Err(e) => {
+                    errs.push(e);
+                    Err(errs.join("; "))
+                }
+            };
+            (idx, outcome)
+        });
     }
 
-    if tasks.is_empty() {
+    if probes.is_empty() {
         return (
             Vec::new(),
             Some("all mirrors tripped — cooling down".into()),
         );
     }
 
-    let mut results = Vec::with_capacity(tasks.len());
-    for (i, t) in tasks.into_iter().enumerate() {
-        let (mirror, plan) = &probes[i];
-        let fresh_tried = fresh && *plan == MirrorPlan::Full;
-        let outcome = match t.await {
-            Ok(Ok((fresh_ok, ts))) => {
-                health.observe_result(mirror, fresh_tried, true, fresh_ok);
-                Ok(ts)
+    let mut results = Vec::with_capacity(probes.len());
+    let mut early = false;
+    while let Some(joined) = set.join_next().await {
+        match record_mirror_join(health, &probes, fresh, joined) {
+            Some((idx, Ok((fresh_ok, ts)))) => {
+                if feed_early_done(fresh_ok, &ts) {
+                    early = true;
+                }
+                results.push((idx, Ok(ts)));
             }
-            Ok(Err(e)) => {
-                health.observe_result(mirror, fresh_tried, false, false);
-                Err(e)
+            Some((idx, Err(e))) => results.push((idx, Err(e))),
+            None => {} // cancelled — not a breaker failure
+        }
+        if early {
+            set.abort_all();
+            while let Some(joined) = set.join_next().await {
+                match record_mirror_join(health, &probes, fresh, joined) {
+                    Some((idx, Ok((_fresh_ok, ts)))) => results.push((idx, Ok(ts))),
+                    Some((idx, Err(e))) => results.push((idx, Err(e))),
+                    None => {}
+                }
             }
-            Err(e) => {
-                health.observe_result(mirror, fresh_tried, false, false);
-                Err(format!("mirror task: {e}"))
-            }
-        };
-        results.push((i, outcome));
+            break;
+        }
     }
     pick_best_feed(results)
+}
+
+/// True when a mirror result is good enough to cancel peers still in flight.
+fn feed_early_done(fresh_ok: bool, tweets: &[Tweet]) -> bool {
+    fresh_ok && !tweets.is_empty()
+}
+
+/// Index into `probes` + fresh flag + tweets, or mirror error string.
+type MirrorJoinOk = (usize, Result<(bool, Vec<Tweet>), String>);
+
+/// Map a `JoinSet` completion onto breaker updates + a pick_best row.
+/// `None` = task was cancelled (abort) — do not punish the mirror.
+fn record_mirror_join(
+    health: &mut FeedHealth,
+    probes: &[(String, MirrorPlan)],
+    fresh: bool,
+    joined: Result<MirrorJoinOk, tokio::task::JoinError>,
+) -> Option<MirrorJoinOk> {
+    match joined {
+        Err(e) if e.is_cancelled() => None,
+        Ok((idx, Ok((fresh_ok, ts)))) => {
+            let (mirror, plan) = &probes[idx];
+            let fresh_tried = fresh && *plan == MirrorPlan::Full;
+            health.observe_result(mirror, fresh_tried, true, fresh_ok);
+            Some((idx, Ok((fresh_ok, ts))))
+        }
+        Ok((idx, Err(e))) => {
+            let (mirror, plan) = &probes[idx];
+            let fresh_tried = fresh && *plan == MirrorPlan::Full;
+            health.observe_result(mirror, fresh_tried, false, false);
+            Some((idx, Err(e)))
+        }
+        Err(e) => {
+            // Non-cancel join failure — no idx; skip breaker.
+            let _ = e;
+            None
+        }
+    }
 }
 
 pub async fn fetch_announce(
@@ -991,7 +1027,6 @@ pub async fn once_json(cfg: &Config) -> Result<String> {
             "liq_usd": snap.gecko_liq_usd(),
             "vol_24h": snap.gecko_token.vol_24h,
             "mcap": snap.gecko_token.market_cap,
-            "pools": snap.gecko_pools.len(),
         },
         "errors": snap.errors,
     });
@@ -1169,36 +1204,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_gecko_pools() {
-        let raw = Ok(serde_json::json!({"data": [
-            {"id": "solana_a", "attributes": {
-                "reserve_in_usd": "2012345",
-                "volume_usd": "1900000",
-                "base_token_price_usd": "0.2131"
-            }},
-            {"id": "solana_b", "attributes": {
-                "reserve_in_usd": "500000",
-                "volume_usd": "700000",
-                "base_token_price_usd": "0.2130"
-            }},
-        ]}));
-        let mut errors = HashMap::new();
-        let pools = parse_gecko_pools(raw, &mut errors);
-        assert_eq!(pools.len(), 2);
-        assert_eq!(pools[0].liq_usd, Some(2012345.0));
-        assert_eq!(pools[1].liq_usd, Some(500000.0));
-        assert!(errors.is_empty());
-    }
-
-    #[test]
     fn gecko_errors_are_recorded_not_fatal() {
         let mut errors = HashMap::new();
         let g = parse_gecko_token(Err("HTTP 429".into()), &mut errors);
         assert_eq!(g.price_usd, None);
         assert_eq!(errors.get("gecko-token").map(String::as_str), Some("HTTP 429"));
-        let pools = parse_gecko_pools(Err("HTTP 429".into()), &mut errors);
-        assert!(pools.is_empty());
-        assert!(errors.contains_key("gecko-pools"));
     }
 
     #[test]
@@ -1213,15 +1223,98 @@ mod tests {
     }
 
     #[test]
+    fn feed_early_done_requires_fresh_nonempty() {
+        let t = Tweet {
+            id: "1".into(),
+            text: "hi".into(),
+            ..Default::default()
+        };
+        assert!(feed_early_done(true, std::slice::from_ref(&t)));
+        assert!(!feed_early_done(false, std::slice::from_ref(&t)));
+        assert!(!feed_early_done(true, &[]));
+        assert!(!feed_early_done(false, &[]));
+    }
+
+    #[test]
+    fn cancelled_join_does_not_trip_breaker() {
+        let probes = vec![
+            ("https://nitter.net".into(), MirrorPlan::Full),
+            ("https://nitter.poast.org".into(), MirrorPlan::Full),
+        ];
+        let mut health = FeedHealth::default();
+        let win = Ok((
+            0usize,
+            Ok((
+                true,
+                vec![Tweet {
+                    id: "1".into(),
+                    text: "x".into(),
+                    ..Default::default()
+                }],
+            )),
+        ));
+        let got = record_mirror_join(&mut health, &probes, true, win);
+        assert!(matches!(got, Some((0, Ok((true, ref ts)))) if feed_early_done(true, ts)));
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cancelled = rt.block_on(async {
+            let mut set = tokio::task::JoinSet::new();
+            set.spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                (
+                    1usize,
+                    Ok((false, Vec::<Tweet>::new())) as Result<(bool, Vec<Tweet>), String>,
+                )
+            });
+            set.abort_all();
+            set.join_next().await.unwrap()
+        });
+        assert!(cancelled.as_ref().err().is_some_and(|e| e.is_cancelled()));
+        let recorded = record_mirror_join(&mut health, &probes, true, cancelled);
+        assert!(recorded.is_none());
+        assert_eq!(
+            health.plan_mirror("https://nitter.poast.org"),
+            MirrorPlan::Full
+        );
+        assert_eq!(health.plan_mirror("https://nitter.net"), MirrorPlan::Full);
+    }
+
+    #[test]
     fn retryable_matches_flaky_failures_only() {
-        assert!(retryable("HTTP 429"));
-        assert!(retryable("HTTP 500"));
-        assert!(retryable("HTTP 503"));
-        assert!(retryable("reqwest: operation timed out"));
-        assert!(retryable("reqwest: error sending request for url (x): connection reset by peer"));
-        assert!(!retryable("HTTP 404"));
-        assert!(!retryable("HTTP 401"));
-        assert!(!retryable("json: unexpected end of input"));
-        assert!(!retryable("text: stream error"));
+        let gecko = "https://api.geckoterminal.com/api/v2/networks/solana/tokens/x";
+        let jup = "https://lite-api.jup.ag/tokens/v2/search?query=x";
+        // Gecko 429 is not retried — doubles free-tier pressure with near-zero upside.
+        assert!(!retryable("HTTP 429", gecko));
+        // Non-Gecko 429 still gets one backoff retry.
+        assert!(retryable("HTTP 429", jup));
+        assert!(retryable("HTTP 500", jup));
+        assert!(retryable("HTTP 503", gecko));
+        assert!(retryable(
+            "reqwest: operation timed out",
+            "https://api.rugcheck.xyz/v1/tokens/x/report"
+        ));
+        assert!(retryable(
+            "reqwest: error sending request for url (x): connection reset by peer",
+            jup
+        ));
+        assert!(!retryable("HTTP 404", jup));
+        assert!(!retryable("HTTP 401", jup));
+        assert!(!retryable("json: unexpected end of input", jup));
+        assert!(!retryable("text: stream error", jup));
+    }
+
+    #[test]
+    fn gecko_fetch_specs_is_two_and_omits_pools() {
+        let specs = gecko_fetch_specs("9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump");
+        assert_eq!(specs.len(), 2);
+        let names: Vec<_> = specs.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, vec!["gecko", "gecko-token"]);
+        for (_, url) in &specs {
+            assert!(url.contains("api.geckoterminal.com"));
+            assert!(!url.contains("/pools"));
+        }
     }
 }

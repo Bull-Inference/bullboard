@@ -92,13 +92,6 @@ pub struct GeckoToken {
     pub liquidity: Option<f64>,
 }
 
-/// One GeckoTerminal pool — per-pool on-chain reserves are usually closer to
-/// real liquidity than DexScreener's summed figure.
-#[derive(Clone, Debug, Default)]
-pub struct GeckoPool {
-    pub liq_usd: Option<f64>,
-}
-
 /// Aggregated $ANSEM on-chain / market intelligence.
 #[derive(Clone, Debug, Default)]
 pub struct Token {
@@ -175,7 +168,6 @@ pub struct Snapshot {
     pub ohlc: Value,
     pub token: Token,
     pub gecko_token: GeckoToken,
-    pub gecko_pools: Vec<GeckoPool>,
     pub tweets: Vec<Tweet>,
     pub tweet_error: Option<String>,
     pub errors: HashMap<String, String>,
@@ -278,9 +270,6 @@ impl Snapshot {
         keep_opt!(ng.fdv, og.fdv);
         keep_opt!(ng.vol_24h, og.vol_24h);
         keep_opt!(ng.liquidity, og.liquidity);
-        if new.gecko_pools.is_empty() {
-            new.gecko_pools = old.gecko_pools.clone();
-        }
 
         new
     }
@@ -313,21 +302,10 @@ impl Snapshot {
             .or(self.gecko_token.change_24h)
     }
 
-    /// Gecko's view of liquidity: the token endpoint's `total_reserve_in_usd`
-    /// when available, else the sum of per-pool reserves.
+    /// Gecko liquidity from the token endpoint (`total_reserve_in_usd`).
+    /// Per-pool reserves are no longer polled.
     pub fn gecko_liq_usd(&self) -> Option<f64> {
-        if let Some(v) = self.gecko_token.liquidity {
-            return Some(v);
-        }
-        let mut sum = 0.0;
-        let mut any = false;
-        for p in &self.gecko_pools {
-            if let Some(v) = p.liq_usd {
-                sum += v;
-                any = true;
-            }
-        }
-        any.then_some(sum)
+        self.gecko_token.liquidity
     }
 
     pub fn closes(&self) -> Vec<f64> {

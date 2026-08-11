@@ -4,7 +4,7 @@
 
 **A friendly terminal dashboard for `$ANSEM` + `@blknoiz06`** — watch the price and keep up with the tweets, right from your own computer.
 
-![version](https://img.shields.io/badge/version-0.3.3-0a0b09?style=for-the-badge&labelColor=1b1f16)
+![version](https://img.shields.io/badge/version-0.4.0-0a0b09?style=for-the-badge&labelColor=1b1f16)
 ![license](https://img.shields.io/badge/license-MIT-0a0b09?style=for-the-badge&labelColor=1b1f16)
 ![rust](https://img.shields.io/badge/rust-2021_edition-0a0b09?style=for-the-badge&labelColor=1b1f16&logo=rust&logoColor=c8f542)
 ![tui](https://img.shields.io/badge/built_with-ratatui-0a0b09?style=for-the-badge&labelColor=1b1f16)
@@ -60,17 +60,20 @@ Nine panes on one screen — price and 24h change up top, then:
 
 | Pane | What it tells you |
 |------|-------------------|
-| PRICE · LIQUIDITY · SAFETY · SUPPLY | The four top cards: price + volume, liquidity (Gecko cross-checked), contract safety (mint/freeze/rug/LP lock), and supply + FDV |
+| PRICE · LIQUIDITY · SAFETY · SUPPLY | The four top cards: price + volume with a Gecko cross-check (amber `(!)` when sources disagree), liquidity with the pair it quotes, contract safety (mint/freeze/rug score/insiders/LP lock), and supply + FDV |
 | **Announce feed** | `@blknoiz06`'s tweets, newest first — click or press `o` to open one |
-| Signals | Plain-English health checks: is liquidity deep? are top holders concentrated? |
-| Activity | Buy/sell volume, DEX pair flow, and a Gecko cross-check on liquidity |
-| Market / Holders | Sparklines, 24h high/low, and holder distribution |
+| Signals | Plain-English health checks: is liquidity deep? are top holders concentrated? is the dev wallet holding too much? |
+| Activity | Buy/sell volume per window, organic vs. net buyers, DEX pair flow with pool age, and a Gecko cross-check on liquidity |
+| Market / Holders | Sparklines, 24h high/low, verified/launchpad badges, and holder distribution (top-10 concentration + bands) |
+
+Press `?` in the app for the full key and mouse reference — it's always one keystroke away.
 
 ## Keys — the short version
 
 | Key | Action |
 |-----|--------|
-| `q` / `Esc` | quit |
+| `q` / `Esc` / `Ctrl+C` | quit |
+| `?` / `h` | show the help overlay |
 | `r` | refresh everything now |
 | `n` | refresh the tweet feed now |
 | `t` | toggle desktop notifications when he posts |
@@ -124,6 +127,7 @@ That's the whole "resilience" story. The only time you'd touch `BULLBOARD_MIRROR
 
 ## If something looks wrong
 
+- **The header shows `src 5/8` in amber** — one or more data sources are down right now; the board keeps showing their last good values until they recover, and the counter tells you the state at a glance.
 - **"mirror error, showing last good"** — a tweet mirror hiccuped; you're seeing the last good feed and it'll retry on its own. Usually nothing to do.
 - **A pane shows `—` or `no data`** — that one source is having a moment; the rest of the board keeps working.
 - **Tweets are slow** — make sure `BULLBOARD_FRESH_FEED` isn't set to `0`, and that the mirror list in `BULLBOARD_MIRRORS` (if set) is reachable.

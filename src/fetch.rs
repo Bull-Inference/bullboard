@@ -1,4 +1,4 @@
-use crate::config::{Config, FeedMode};
+use crate::config::Config;
 use crate::model::{
     DexPair, GeckoPool, GeckoToken, RiskFlag, Snapshot, Token, TopHolder, Tweet, WindowStats,
 };
@@ -14,11 +14,52 @@ use std::time::Duration;
 pub fn http_client() -> Result<Client> {
     Ok(Client::builder()
         .timeout(Duration::from_secs(12))
-        .user_agent("bullboard/0.2")
+        .user_agent(format!("bullboard/{}", env!("CARGO_PKG_VERSION")))
         .build()?)
 }
 
+/// Retry once after a short pause on rate-limits, server errors, and network
+/// hiccups — the most common flaky-source failure modes. 4xx (other than 429)
+/// are real responses and are not retried.
+const RETRY_DELAY: Duration = Duration::from_millis(800);
+
 async fn get_json(client: &Client, url: &str) -> Result<Value, String> {
+    match fetch_json(client, url).await {
+        Ok(v) => Ok(v),
+        Err(e) if retryable(&e) => {
+            tokio::time::sleep(RETRY_DELAY).await;
+            fetch_json(client, url).await
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn get_text(client: &Client, url: &str) -> Result<String, String> {
+    match fetch_text(client, url).await {
+        Ok(v) => Ok(v),
+        Err(e) if retryable(&e) => {
+            tokio::time::sleep(RETRY_DELAY).await;
+            fetch_text(client, url).await
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn retryable(err: &str) -> bool {
+    if let Some(status) = err.strip_prefix("HTTP ") {
+        match status.parse::<u16>() {
+            Ok(429) => true,
+            Ok(code) => code >= 500,
+            Err(_) => false,
+        }
+    } else {
+        // Reqwest transport failures (timeouts, connection resets, DNS) are
+        // worth one retry; parse errors ("json: …") are not.
+        err.starts_with("reqwest: ")
+    }
+}
+
+async fn fetch_json(client: &Client, url: &str) -> Result<Value, String> {
     match client.get(url).send().await {
         Ok(resp) => {
             if !resp.status().is_success() {
@@ -28,11 +69,11 @@ async fn get_json(client: &Client, url: &str) -> Result<Value, String> {
                 .await
                 .map_err(|e| format!("json: {e}"))
         }
-        Err(e) => Err(format!("{e}")),
+        Err(e) => Err(format!("reqwest: {e}")),
     }
 }
 
-async fn get_text(client: &Client, url: &str) -> Result<String, String> {
+async fn fetch_text(client: &Client, url: &str) -> Result<String, String> {
     match client.get(url).send().await {
         Ok(resp) => {
             if !resp.status().is_success() {
@@ -40,7 +81,7 @@ async fn get_text(client: &Client, url: &str) -> Result<String, String> {
             }
             resp.text().await.map_err(|e| format!("text: {e}"))
         }
-        Err(e) => Err(format!("{e}")),
+        Err(e) => Err(format!("reqwest: {e}")),
     }
 }
 
@@ -142,8 +183,6 @@ fn parse_dex_pairs(raw: Result<Value, String>, errors: &mut HashMap<String, Stri
         let liq = p.get("liquidity").cloned().unwrap_or(Value::Null);
         let vol = p.get("volume").cloned().unwrap_or(Value::Null);
         let ch = p.get("priceChange").cloned().unwrap_or(Value::Null);
-        let tx = p.get("txns").cloned().unwrap_or(Value::Null);
-        let h24 = tx.get("h24").cloned().unwrap_or(Value::Null);
         let quote = p
             .pointer("/quoteToken/symbol")
             .and_then(|s| s.as_str())
@@ -162,13 +201,8 @@ fn parse_dex_pairs(raw: Result<Value, String>, errors: &mut HashMap<String, Stri
             change_h6: json_f(&ch, "h6"),
             change_h24: json_f(&ch, "h24"),
             vol_h24: json_f(&vol, "h24"),
-            vol_h1: json_f(&vol, "h1"),
             liq_usd: json_f(&liq, "usd"),
-            liq_base: json_f(&liq, "base"),
-            liq_quote: json_f(&liq, "quote"),
             quote_symbol: quote,
-            buys_h24: json_u(&h24, "buys"),
-            sells_h24: json_u(&h24, "sells"),
             fdv: json_f(&p, "fdv"),
             mcap: json_f(&p, "marketCap"),
             pair_created_ms: json_u(&p, "pairCreatedAt"),
@@ -388,10 +422,7 @@ fn parse_gecko_pools(
         for p in arr.iter().take(6) {
             let attrs = p.get("attributes").cloned().unwrap_or(Value::Null);
             pools.push(GeckoPool {
-                id: json_str(p, "id").unwrap_or_default(),
                 liq_usd: json_f(&attrs, "reserve_in_usd"),
-                vol_usd: json_f(&attrs, "volume_usd"),
-                price_usd: json_f(&attrs, "base_token_price_usd"),
             });
         }
     }
@@ -451,16 +482,22 @@ pub async fn fetch_snapshot(client: &Client, cfg: &Config) -> Snapshot {
     }
 
     let mut errors = HashMap::new();
-    let mut snap = Snapshot::default();
-    snap.price = take_val(&mut map, "price", &mut errors);
-    snap.ohlc = take_val(&mut map, "ohlc", &mut errors);
+    let mut snap = Snapshot {
+        price: take_val(&mut map, "price", &mut errors),
+        ohlc: take_val(&mut map, "ohlc", &mut errors),
+        ..Default::default()
+    };
 
-    let jup = map.remove("jupiter").unwrap_or(Err("missing".into()));
-    let gecko = map.remove("gecko").unwrap_or(Err("missing".into()));
-    let gecko_token = map.remove("gecko-token").unwrap_or(Err("missing".into()));
-    let gecko_pools = map.remove("gecko-pools").unwrap_or(Err("missing".into()));
-    let rug = map.remove("rugcheck").unwrap_or(Err("missing".into()));
-    let dex = map.remove("dex").unwrap_or(Err("missing".into()));
+    let jup = map.remove("jupiter").unwrap_or_else(|| Err("fetch task crashed".into()));
+    let gecko = map.remove("gecko").unwrap_or_else(|| Err("fetch task crashed".into()));
+    let gecko_token = map
+        .remove("gecko-token")
+        .unwrap_or_else(|| Err("fetch task crashed".into()));
+    let gecko_pools = map
+        .remove("gecko-pools")
+        .unwrap_or_else(|| Err("fetch task crashed".into()));
+    let rug = map.remove("rugcheck").unwrap_or_else(|| Err("fetch task crashed".into()));
+    let dex = map.remove("dex").unwrap_or_else(|| Err("fetch task crashed".into()));
     snap.token = parse_token(&mint, jup, gecko, rug, dex, &mut errors);
     snap.gecko_token = parse_gecko_token(gecko_token, &mut errors);
     snap.gecko_pools = parse_gecko_pools(gecko_pools, &mut errors);
@@ -493,7 +530,12 @@ fn clean_tweet_text(raw: &str) -> String {
     if let Some(idx) = t.find("https://nitter.") {
         t.truncate(idx);
     }
-    t = t.replace("#m", "");
+    // Nitter links to the post itself carry a `#m` fragment (the anchor text
+    // after truncation above). Strip only that trailing artifact — never a
+    // legitimate "#m" inside the post body.
+    if t.ends_with("#m") {
+        t.truncate(t.len() - 2);
+    }
     t.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -617,10 +659,7 @@ fn parse_rss(xml: &str, handle: &str) -> Vec<Tweet> {
                     continue;
                 }
                 let text = String::from_utf8_lossy(t.as_ref()).to_string();
-                match cur_tag.as_str() {
-                    "description" => desc.push_str(&text),
-                    _ => {}
-                }
+                if cur_tag.as_str() == "description" { desc.push_str(&text) }
             }
             Ok(Event::Eof) => break,
             Err(_) => break,
@@ -894,7 +933,6 @@ pub async fn fetch_tweets(
 pub async fn fetch_announce(
     client: &Client,
     cfg: &Config,
-    _mode: FeedMode,
     limit: usize,
     health: &mut FeedHealth,
 ) -> (Vec<Tweet>, Option<String>) {
@@ -905,7 +943,7 @@ pub async fn once_json(cfg: &Config) -> Result<String> {
     let client = http_client()?;
     let mut snap = fetch_snapshot(&client, cfg).await;
     let mut health = FeedHealth::default();
-    let (tweets, terr) = fetch_announce(&client, cfg, FeedMode::Primary, 12, &mut health).await;
+    let (tweets, terr) = fetch_announce(&client, cfg, 12, &mut health).await;
     snap.tweets = tweets;
     snap.tweet_error = terr;
     let t = &snap.token;
@@ -916,16 +954,32 @@ pub async fn once_json(cfg: &Config) -> Result<String> {
         "price_usd": snap.price_usd(),
         "change_24h": snap.change_24h(),
         "token": {
+            "symbol": t.symbol,
+            "name": t.name,
             "holders": t.holder_count,
             "holder_change_24h": t.stats_24h.holder_change,
             "mcap": t.mcap,
+            "fdv": t.fdv,
+            "circ_supply": t.circ_supply,
+            "total_supply": t.total_supply,
             "liquidity": t.liquidity,
             "vol_24h": t.stats_24h.buy_volume.zip(t.stats_24h.sell_volume).map(|(b,s)| b+s)
                 .or_else(|| t.primary_pair.as_ref().and_then(|p| p.vol_h24)),
             "buys_24h": t.stats_24h.buys,
             "sells_24h": t.stats_24h.sells,
             "traders_24h": t.stats_24h.traders,
+            "organic_buyers_24h": t.stats_24h.organic_buyers,
+            "net_buyers_24h": t.stats_24h.net_buyers,
             "top10_pct": t.top10_pct,
+            "top11_20_pct": t.top11_20_pct,
+            "top21_40_pct": t.top21_40_pct,
+            "rest_pct": t.rest_pct,
+            "dev_balance_pct": t.dev_balance_pct,
+            "graph_insiders": t.graph_insiders,
+            "lp_locked_pct": t.lp_locked_pct,
+            "is_verified": t.is_verified,
+            "launchpad": t.launchpad,
+            "graduated": t.graduated_at.is_some(),
             "mint_auth_disabled": t.mint_auth_disabled,
             "freeze_auth_disabled": t.freeze_auth_disabled,
             "pairs": t.pairs.len(),
@@ -1134,10 +1188,8 @@ mod tests {
         let mut errors = HashMap::new();
         let pools = parse_gecko_pools(raw, &mut errors);
         assert_eq!(pools.len(), 2);
-        assert_eq!(pools[0].id, "solana_a");
         assert_eq!(pools[0].liq_usd, Some(2012345.0));
-        assert_eq!(pools[1].vol_usd, Some(700000.0));
-        assert_eq!(pools[1].price_usd, Some(0.2130));
+        assert_eq!(pools[1].liq_usd, Some(500000.0));
         assert!(errors.is_empty());
     }
 
@@ -1150,5 +1202,29 @@ mod tests {
         let pools = parse_gecko_pools(Err("HTTP 429".into()), &mut errors);
         assert!(pools.is_empty());
         assert!(errors.contains_key("gecko-pools"));
+    }
+
+    #[test]
+    fn clean_text_keeps_legit_hashm() {
+        // "#m" inside the body survives; only a trailing #m fragment is cut.
+        assert_eq!(clean_tweet_text("the #m move is on"), "the #m move is on");
+        assert_eq!(clean_tweet_text("buy the dip #m"), "buy the dip");
+        assert_eq!(
+            clean_tweet_text("text https://nitter.net/u/status/1#m"),
+            "text"
+        );
+    }
+
+    #[test]
+    fn retryable_matches_flaky_failures_only() {
+        assert!(retryable("HTTP 429"));
+        assert!(retryable("HTTP 500"));
+        assert!(retryable("HTTP 503"));
+        assert!(retryable("reqwest: operation timed out"));
+        assert!(retryable("reqwest: error sending request for url (x): connection reset by peer"));
+        assert!(!retryable("HTTP 404"));
+        assert!(!retryable("HTTP 401"));
+        assert!(!retryable("json: unexpected end of input"));
+        assert!(!retryable("text: stream error"));
     }
 }

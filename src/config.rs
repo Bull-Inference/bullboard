@@ -26,6 +26,13 @@ pub const POST_FG: ratatui::style::Color = ratatui::style::Color::Rgb(80, 200, 1
 pub const WARN: ratatui::style::Color = ratatui::style::Color::Rgb(230, 184, 77);
 pub const BAD: ratatui::style::Color = ratatui::style::Color::Rgb(227, 93, 93);
 
+// Per-pane accents — muted hues so the board reads as one acid-on-dark
+// family, each pane with its own quiet identity.
+pub const CYAN: ratatui::style::Color = ratatui::style::Color::Rgb(94, 224, 214);
+pub const VIOLET: ratatui::style::Color = ratatui::style::Color::Rgb(186, 158, 255);
+pub const BLUE: ratatui::style::Color = ratatui::style::Color::Rgb(116, 170, 255);
+pub const PURPLE: ratatui::style::Color = ratatui::style::Color::Rgb(224, 124, 226);
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub api_base: String,
@@ -75,18 +82,5 @@ impl Config {
                 .filter(|v: &Vec<String>| !v.is_empty())
                 .unwrap_or_else(|| NITTER_BASES.iter().map(|s| s.to_string()).collect()),
         }
-    }
-}
-
-/// Announce feed source — $ANSEM-related X only (no inference alt handle).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum FeedMode {
-    #[default]
-    Primary,
-}
-
-impl FeedMode {
-    pub fn label(self, cfg: &Config) -> String {
-        cfg.x_handle.clone()
     }
 }

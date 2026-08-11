@@ -1,12 +1,15 @@
 use crate::app::App;
 use crate::config::{
-    ACID, BAD, BORDER, CANVAS_BG, FG, MUTED, PANEL_BG, POST_FG, TWEET_FG, WARN,
+    ACID, BAD, BLUE, BORDER, CANVAS_BG, CYAN, FG, MUTED, PANEL_BG, POST_FG, PURPLE, TWEET_FG,
+    VIOLET, WARN,
 };
+use crate::format::is_post_line;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    Block, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Wrap,
 };
 use ratatui::Frame;
 
@@ -22,9 +25,9 @@ const OUTER_H: u16 = 1;
 const PAD_H: u16 = 1;
 /// KPI cards: generous horizontal pad so hero text floats.
 const KPI_PAD_H: u16 = 2;
-/// KPI cards: top/bottom pad inside the box.
-/// Keep pad modest so h=9 cards still get content_h ≥ 4 (hero·blank·detail·sub).
-const KPI_PAD_V: u16 = 1;
+/// KPI cards: no vertical box pad — the renderer centers the block itself,
+/// so a 4-line card gets real float on any tall-enough top row.
+const KPI_PAD_V: u16 = 0;
 
 /// How a pane is drawn — matches Surfboard: only KPI + feeds are boxes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,13 +92,29 @@ impl PaneId {
         }
     }
 
+    /// Quiet per-pane accent hue for idle titles; focused panes flip to acid.
+    pub fn accent(self) -> Color {
+        match self {
+            PaneId::Gate => ACID,
+            PaneId::Treasury => CYAN,
+            PaneId::Stake => WARN,
+            PaneId::Mcap => VIOLET,
+            PaneId::Announce => TWEET_FG,
+            PaneId::Signals => FG,
+            PaneId::Activity => TWEET_FG,
+            PaneId::Market => BLUE,
+            PaneId::Holders => PURPLE,
+        }
+    }
+
     pub fn from_index(i: usize) -> Self {
         Self::all()[i % NUM_PANES]
     }
 
-    /// Announce + activity wrap; KPI cards stay fixed-width.
+    /// Announce wraps; everything else is truncated at the pane edge so the
+    /// columnar rows (activity pairs, holders, market) never reflow.
     fn wraps(self) -> bool {
-        matches!(self, PaneId::Announce | PaneId::Activity)
+        matches!(self, PaneId::Announce)
     }
 }
 
@@ -203,10 +222,10 @@ fn body_row_heights(body_h: u16) -> (u16, u16, u16) {
     // Two wide gutters between top / mid / bot (matches shell_layout spacing).
     let usable = body_h.saturating_sub(GUTTER_WIDE * 2);
 
-    // KPI cards: content_h = h - 2 - 2*KPI_PAD_V. With KPI_PAD_V=1 need h≥8 for 4-line heroes.
-    // Cap top so mid (activity) isn't starved on mid-size terminals.
+    // KPI cards: content_h = h - 2 (no vertical box pad). Need h≥7 for a
+    // 4-line card plus one row of float; 8+ adds real air.
     let top = match usable {
-        0..=12 => 6u16,
+        0..=12 => 5u16,
         13..=20 => 7,
         21..=28 => 8,
         29..=40 => 9,
@@ -291,9 +310,9 @@ fn mid_row_areas(area: Rect) -> (Rect, Rect, Rect) {
             .split(area);
         let right = Layout::default()
             .direction(Direction::Vertical)
-            // Signals: short open checklist (~8 rows); activity takes the rest.
-            // Signals: compact open checklist; activity keeps a real boxed panel.
-            .constraints([Constraint::Length(5), Constraint::Min(8)])
+            // Signals: open checklist sized for its 6 content rows (title row
+            // + 6) so it never needs scrolling; activity takes the rest.
+            .constraints([Constraint::Length(7), Constraint::Min(8)])
             .spacing(GUTTER)
             .split(mid[1]);
         (mid[0], right[0], right[1])
@@ -381,6 +400,26 @@ pub fn pane_scroll_bounds_for(area: Rect, id: PaneId, line_count: usize) -> (u16
 
 pub fn draw(f: &mut Frame, app: &App) {
     let frame_area = f.area();
+
+    // Tiny terminals get an honest notice instead of a clipped, unreadable board.
+    if frame_area.width < 52 || frame_area.height < 16 {
+        f.render_widget(
+            Block::default().style(Style::default().bg(CANVAS_BG)),
+            frame_area,
+        );
+        let msg = "terminal too small — resize to at least 52×16";
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                msg,
+                Style::default().fg(WARN),
+            )]))
+            .alignment(Alignment::Center)
+            .style(Style::default().bg(CANVAS_BG)),
+            Rect::new(0, frame_area.height / 2, frame_area.width, 1),
+        );
+        return;
+    }
+
     // Canvas is darker than panel cards — gutters become real dark air.
     f.render_widget(
         Block::default().style(Style::default().bg(CANVAS_BG)),
@@ -418,15 +457,32 @@ pub fn draw(f: &mut Frame, app: &App) {
     render_pane(f, app, PaneId::Market, areas.get(PaneId::Market));
     render_pane(f, app, PaneId::Holders, areas.get(PaneId::Holders));
 
-    // Footer on canvas.
+    // Footer: keys left, live status right.
+    let ftr_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(ftr);
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            app.footer_text(),
+            app.footer_keys(),
             Style::default().fg(MUTED),
         )]))
         .style(Style::default().bg(CANVAS_BG)),
-        ftr,
+        ftr_cols[0],
     );
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            app.footer_status(),
+            Style::default().fg(MUTED),
+        )]))
+        .alignment(Alignment::Right)
+        .style(Style::default().bg(CANVAS_BG)),
+        ftr_cols[1],
+    );
+
+    if app.show_help {
+        render_help(f, frame_area);
+    }
 }
 
 fn render_pane(f: &mut Frame, app: &App, id: PaneId, area: Rect) {
@@ -454,7 +510,8 @@ fn render_pane_titled(f: &mut Frame, app: &App, id: PaneId, title: &str, area: R
     } else if hovered {
         Style::default().fg(FG).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(MUTED).add_modifier(Modifier::BOLD)
+        // Idle titles carry the pane's quiet accent hue.
+        Style::default().fg(id.accent()).add_modifier(Modifier::BOLD)
     };
 
     let lines = app.lines_for(id);
@@ -470,7 +527,7 @@ fn render_pane_titled(f: &mut Frame, app: &App, id: PaneId, title: &str, area: R
                 if chars == 0 {
                     1
                 } else {
-                    ((chars + content_w - 1) / content_w).max(1)
+                    chars.div_ceil(content_w).max(1)
                 }
             })
             .sum()
@@ -481,14 +538,24 @@ fn render_pane_titled(f: &mut Frame, app: &App, id: PaneId, title: &str, area: R
     let scroll = app.scroll_of(id).min(max_scroll);
 
     let mut text_lines: Vec<Line> = if is_kpi_card(id) {
-        style_kpi_card_lines(&lines)
+        style_kpi_card_lines(id, &lines)
     } else if id == PaneId::Announce {
         style_announce_lines(&lines, app.selected_tweet, app.hover_tweet)
     } else {
         lines.iter().map(|l| style_line(id, l)).collect()
     };
 
-    // KPI cards: vertically center the short 3-line block in the card.
+    // Non-wrapping panes clip with an ellipsis at the pane edge instead of
+    // reflowing, so columnar rows (pairs, holders, market) keep their shape.
+    // KPI cards get the same treatment as a narrow-terminal safety net.
+    if !id.wraps() && content_w > 0 {
+        text_lines = text_lines
+            .into_iter()
+            .map(|l| truncate_line(l, content_w))
+            .collect();
+    }
+
+    // KPI cards: vertically center the short block in the card.
     if is_kpi_card(id) && max_scroll == 0 && content_h as usize > text_lines.len() {
         let spare = content_h as usize - text_lines.len();
         let top_blank = spare / 2;
@@ -505,6 +572,8 @@ fn render_pane_titled(f: &mut Frame, app: &App, id: PaneId, title: &str, area: R
     } else {
         format!(" {title} ")
     };
+    // Long dynamic titles (announce) get clipped with an ellipsis too.
+    let title_text = ellipsize(&title_text, area.width.saturating_sub(2) as usize);
 
     match chrome {
         PaneChrome::Card | PaneChrome::Feed => {
@@ -605,8 +674,10 @@ fn render_scrollbar(
     );
 }
 
-/// Surfboard KPI: hero (bold acid) → blank → detail (muted) → sub (quieter).
-fn style_kpi_card_lines(lines: &[String]) -> Vec<Line<'static>> {
+/// KPI card lines: hero (bold acid) → detail (pane accent) → whisper (muted),
+/// with deltas / flags / badges re-colored by `rich_spans`.
+fn style_kpi_card_lines(id: PaneId, lines: &[String]) -> Vec<Line<'static>> {
+    let accent = id.accent();
     let mut out = Vec::with_capacity(lines.len());
     let mut non_empty_idx = 0usize;
     for raw in lines {
@@ -614,36 +685,193 @@ fn style_kpi_card_lines(lines: &[String]) -> Vec<Line<'static>> {
             out.push(Line::from(""));
             continue;
         }
-        let style = match non_empty_idx {
+        let base = match non_empty_idx {
             0 => Style::default().fg(ACID).add_modifier(Modifier::BOLD),
-            1 => Style::default().fg(FG),   // detail
-            _ => Style::default().fg(MUTED), // whisper
+            1 => Style::default().fg(accent),
+            _ => Style::default().fg(MUTED),
         };
-        // Color positive/negative deltas on any line.
-        if raw.contains('▲') {
-            out.push(Line::from(Span::styled(
-                raw.clone(),
-                Style::default().fg(ACID).add_modifier(if non_empty_idx == 0 {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
-            )));
-        } else if raw.contains('▼') {
-            out.push(Line::from(Span::styled(
-                raw.clone(),
-                Style::default().fg(BAD).add_modifier(if non_empty_idx == 0 {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
-            )));
-        } else {
-            out.push(Line::from(Span::styled(raw.clone(), style)));
-        }
+        out.push(Line::from(rich_spans(raw, base)));
         non_empty_idx += 1;
     }
     out
+}
+
+/// Color the meaningful tokens in machine-built lines: ▲/▼ deltas by
+/// direction, `(!)` source disagreements, `[badge]` chips (verified /
+/// graduated acid, dev amber, launchpad neutral, `[####--]` bars muted), and
+/// trailing insider `*` marks. Everything else keeps `base`.
+fn rich_spans(raw: &str, base: Style) -> Vec<Span<'static>> {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut plain = String::new();
+    let flush = |out: &mut Vec<Span<'static>>, plain: &mut String| {
+        if !plain.is_empty() {
+            out.push(Span::styled(std::mem::take(plain), base));
+        }
+    };
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '▲' || c == '▼' {
+            flush(&mut out, &mut plain);
+            // Arrow + its value ("▲ 5.2%") color as one token.
+            let mut tok = String::from(c);
+            i += 1;
+            if i < chars.len() && chars[i].is_whitespace() {
+                tok.push(chars[i]);
+                i += 1;
+                while i < chars.len() && !chars[i].is_whitespace() {
+                    tok.push(chars[i]);
+                    i += 1;
+                }
+            }
+            let color = if c == '▲' { ACID } else { BAD };
+            out.push(Span::styled(
+                tok,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ));
+            continue;
+        }
+        if c == '(' && chars.get(i + 1) == Some(&'!') && chars.get(i + 2) == Some(&')') {
+            flush(&mut out, &mut plain);
+            out.push(Span::styled(
+                "(!)".to_string(),
+                Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+            ));
+            i += 3;
+            continue;
+        }
+        if c == '[' {
+            if let Some(rel) = chars[i + 1..].iter().position(|&x| x == ']') {
+                let j = i + 1 + rel;
+                let inner: String = chars[i + 1..j].iter().collect();
+                flush(&mut out, &mut plain);
+                let style = if inner.contains("verified") || inner.contains("graduated") {
+                    Style::default().fg(ACID).add_modifier(Modifier::BOLD)
+                } else if inner.contains("dev") {
+                    Style::default().fg(WARN).add_modifier(Modifier::BOLD)
+                } else if inner.chars().any(|c| c.is_alphabetic()) {
+                    Style::default().fg(FG) // launchpad tags, etc.
+                } else {
+                    Style::default().fg(MUTED) // [####----] bars
+                };
+                out.push(Span::styled(format!("[{inner}]"), style));
+                i = j + 1;
+                continue;
+            }
+        }
+        if c == '*' && (i == 0 || chars[i - 1].is_whitespace()) {
+            flush(&mut out, &mut plain);
+            out.push(Span::styled(
+                "*".to_string(),
+                Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+            ));
+            i += 1;
+            continue;
+        }
+        plain.push(c);
+        i += 1;
+    }
+    flush(&mut out, &mut plain);
+    out
+}
+
+/// Clip a styled line to `max_chars` with a trailing ellipsis, preserving
+/// each span's style through the cut.
+fn truncate_line(line: Line<'static>, max_chars: usize) -> Line<'static> {
+    if max_chars == 0 {
+        return Line::default();
+    }
+    let total: usize = line
+        .spans
+        .iter()
+        .map(|s| s.content.chars().count())
+        .sum();
+    if total <= max_chars {
+        return line;
+    }
+    let keep = max_chars.saturating_sub(1); // room for the ellipsis
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for span in line.spans {
+        let n = span.content.chars().count();
+        if used + n <= keep {
+            out.push(span);
+            used += n;
+        } else {
+            let room = keep.saturating_sub(used);
+            if room > 0 {
+                let s: String = span.content.chars().take(room).collect();
+                out.push(Span::styled(s, span.style));
+            }
+            out.push(Span::styled("…".to_string(), span.style));
+            break;
+        }
+    }
+    Line::from(out)
+}
+
+/// Clip a plain string to `max_chars` with an ellipsis (titles).
+fn ellipsize(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    if max <= 2 {
+        return s.chars().take(max).collect();
+    }
+    let mut out: String = s.chars().take(max - 1).collect();
+    out.push('…');
+    out
+}
+
+/// Centered help overlay — the complete key + mouse reference. Any key or
+/// click closes it (handled in the app's event loop).
+fn render_help(f: &mut Frame, area: Rect) {
+    const HELP: &[(&str, &str)] = &[
+        ("q / esc", "quit"),
+        ("? / h", "toggle this help"),
+        ("r", "refresh all data now"),
+        ("n", "refresh tweet feed now"),
+        ("t", "toggle desktop notifications"),
+        ("tab / shift-tab", "next / previous pane"),
+        ("1-9", "jump straight to a pane"),
+        ("j / k / arrows", "scroll focused pane"),
+        ("space / f · b", "page down / page up"),
+        ("g / G", "top / bottom of pane"),
+        ("enter / o", "open tweet in browser"),
+        ("mouse", "hover highlight · click focus · wheel scroll"),
+    ];
+    let width = 46u16.min(area.width.saturating_sub(4));
+    let height = (HELP.len() as u16 + 3).min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+
+    let lines: Vec<Line> = HELP
+        .iter()
+        .map(|(k, v)| {
+            Line::from(vec![
+                Span::styled(format!("{k:<16}"), Style::default().fg(ACID)),
+                Span::styled(*v, Style::default().fg(FG)),
+            ])
+        })
+        .collect();
+    f.render_widget(Clear, Rect::new(x, y, width, height));
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(ACID))
+                    .title(Span::styled(
+                        " HELP — press any key to close ",
+                        Style::default().fg(ACID).add_modifier(Modifier::BOLD),
+                    ))
+                    .style(Style::default().bg(PANEL_BG)),
+            )
+            .style(Style::default().bg(PANEL_BG)),
+        Rect::new(x, y, width, height),
+    );
 }
 
 fn style_line(id: PaneId, raw: &str) -> Line<'static> {
@@ -672,7 +900,7 @@ fn style_announce_lines(
             out.push(Line::from(""));
             continue;
         }
-        if raw.contains(" POST ") {
+        if is_post_line(raw) {
             tweet_i = Some(tweet_i.map(|i| i + 1).unwrap_or(0));
         }
         let is_sel = matches!((tweet_i, selected), (Some(a), Some(b)) if a == b);
@@ -706,34 +934,35 @@ fn style_announce(raw: &str, selected: bool, hovered: bool) -> Line<'static> {
             Span::styled(trimmed.to_string(), chip),
         ]);
     }
-    // "MM-DD HH:MM POST text…"
-    if let Some(idx) = raw.find(" POST ") {
-        let when = raw[..idx].to_string();
-        let rest = raw[idx + 6..].to_string();
-        let body_style = if selected {
-            Style::default().fg(ACID)
-        } else if hovered {
-            Style::default().fg(FG).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(TWEET_FG)
-        };
-        let post_style = if hovered || selected {
-            Style::default().fg(POST_FG).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(POST_FG).add_modifier(Modifier::BOLD)
-        };
-        return Line::from(vec![
-            Span::styled(
-                when,
-                if hovered {
-                    Style::default().fg(FG)
-                } else {
-                    Style::default().fg(MUTED)
-                },
-            ),
-            Span::styled(" POST ", post_style),
-            Span::styled(rest, body_style),
-        ]);
+    // "MM-DD HH:MM POST text…" — matched structurally so bodies containing
+    // the literal " POST " can't be mis-tagged.
+    if is_post_line(raw) {
+        if let Some(idx) = raw.find(" POST ") {
+            let when = raw[..idx].to_string();
+            let rest = raw[idx + 6..].to_string();
+            let body_style = if selected {
+                Style::default().fg(ACID)
+            } else if hovered {
+                Style::default().fg(FG).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(TWEET_FG)
+            };
+            return Line::from(vec![
+                Span::styled(
+                    when,
+                    if hovered {
+                        Style::default().fg(FG)
+                    } else {
+                        Style::default().fg(MUTED)
+                    },
+                ),
+                Span::styled(
+                    " POST ",
+                    Style::default().fg(POST_FG).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(rest, body_style),
+            ]);
+        }
     }
     Line::from(Span::styled(
         raw.to_string(),
@@ -760,53 +989,38 @@ fn style_signal(raw: &str) -> Line<'static> {
     let mut parts = rest.splitn(2, "  ");
     let label = parts.next().unwrap_or("").to_string();
     let detail = parts.next().unwrap_or("").to_string();
-    Line::from(vec![
+    let detail_style = if mark.starts_with('○') {
+        Style::default().fg(BAD)
+    } else if mark.starts_with('◐') {
+        Style::default().fg(WARN)
+    } else {
+        Style::default().fg(ACID)
+    };
+    let mut spans = vec![
         Span::styled(mark.to_string(), mark_style),
         Span::styled(
             format!("{label:<12}"),
             Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            detail,
-            if mark.starts_with('○') {
-                Style::default().fg(BAD)
-            } else if mark.starts_with('◐') {
-                Style::default().fg(WARN)
-            } else {
-                Style::default().fg(ACID)
-            },
-        ),
-    ])
+    ];
+    spans.extend(rich_spans(&detail, detail_style));
+    Line::from(spans)
 }
 
 fn style_activity(raw: &str) -> Line<'static> {
-    if raw.starts_with('─') || raw.starts_with("--") {
-        return Line::from(Span::styled(
-            raw.to_string(),
-            Style::default().fg(MUTED),
-        ));
+    if raw.is_empty() {
+        return Line::from("");
     }
-    // highlight B/S legs
-    if raw.contains(" B ")
-        || raw.contains("B $")
-        || raw.starts_with("5m")
+    // Window rows are the flow readout — whole-row acid tint.
+    if raw.starts_with("5m")
         || raw.starts_with("1h")
         || raw.starts_with("6h")
         || raw.starts_with("24h")
         || raw.starts_with("TOTAL LP")
     {
-        return Line::from(Span::styled(
-            raw.to_string(),
-            Style::default().fg(ACID),
-        ));
+        return Line::from(rich_spans(raw, Style::default().fg(ACID)));
     }
-    if raw.contains("ANSEM") {
-        return Line::from(Span::styled(
-            raw.to_string(),
-            Style::default().fg(TWEET_FG),
-        ));
-    }
-    Line::from(Span::styled(raw.to_string(), Style::default().fg(FG)))
+    Line::from(rich_spans(raw, Style::default().fg(FG)))
 }
 
 fn style_kpi(raw: &str, hero_first: bool) -> Line<'static> {
@@ -817,41 +1031,115 @@ fn style_kpi(raw: &str, hero_first: bool) -> Line<'static> {
             || raw.starts_with("holders ")
             || raw.starts_with("HOLDERS"))
     {
-        return Line::from(Span::styled(
-            raw.to_string(),
+        return Line::from(rich_spans(
+            raw,
             Style::default().fg(ACID).add_modifier(Modifier::BOLD),
         ));
     }
-    if raw.contains('▲') {
-        return Line::from(Span::styled(
-            raw.to_string(),
-            Style::default().fg(ACID),
-        ));
-    }
-    if raw.contains('▼') {
-        return Line::from(Span::styled(
-            raw.to_string(),
-            Style::default().fg(BAD),
-        ));
-    }
-    if raw.starts_with("──") || raw.starts_with('[') {
+    if raw.starts_with("──") {
         return Line::from(Span::styled(
             raw.to_string(),
             Style::default().fg(MUTED),
         ));
     }
-    // label/value split on 2+ spaces
+    // label/value split on 2+ spaces → whisper label, lit value
     if let Some(idx) = raw.find("  ") {
         let label = raw[..idx].to_string();
         let value = raw[idx..].to_string();
-        return Line::from(vec![
-            Span::styled(label, Style::default().fg(MUTED)),
-            Span::styled(value, Style::default().fg(FG)),
-        ]);
+        let mut spans = vec![Span::styled(label, Style::default().fg(MUTED))];
+        spans.extend(rich_spans(&value, Style::default().fg(FG)));
+        return Line::from(spans);
     }
-    Line::from(Span::styled(raw.to_string(), Style::default().fg(FG)))
+    Line::from(rich_spans(raw, Style::default().fg(FG)))
 }
 
+
+#[cfg(test)]
+mod style_tests {
+    use super::*;
+
+    fn join(spans: &[Span<'static>]) -> String {
+        spans.iter().map(|s| s.content.to_string()).collect()
+    }
+
+    #[test]
+    fn rich_spans_colors_each_delta_individually() {
+        // Mixed ▲/▼ on one line — each arrow gets its own direction color
+        // instead of the whole line going green.
+        let spans = rich_spans("1h ▲ 2.1%  6h ▼ 1.3%", Style::default().fg(FG));
+        assert_eq!(join(&spans), "1h ▲ 2.1%  6h ▼ 1.3%");
+        let up = spans.iter().find(|s| s.content == "▲ 2.1%").unwrap();
+        assert_eq!(up.style.fg, Some(ACID));
+        let down = spans.iter().find(|s| s.content == "▼ 1.3%").unwrap();
+        assert_eq!(down.style.fg, Some(BAD));
+    }
+
+    #[test]
+    fn rich_spans_styles_disagreement_flag() {
+        let spans = rich_spans("gecko $1.2K (!)", Style::default().fg(MUTED));
+        let flag = spans.iter().find(|s| s.content == "(!)").unwrap();
+        assert_eq!(flag.style.fg, Some(WARN));
+        assert!(flag.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn rich_spans_styles_badges_and_bars() {
+        let spans = rich_spans(
+            "mcap $1.2M [verified] [dev 12%] [####----]",
+            Style::default().fg(FG),
+        );
+        let verified = spans.iter().find(|s| s.content == "[verified]").unwrap();
+        assert_eq!(verified.style.fg, Some(ACID));
+        let dev = spans.iter().find(|s| s.content == "[dev 12%]").unwrap();
+        assert_eq!(dev.style.fg, Some(WARN));
+        let bar = spans.iter().find(|s| s.content == "[####----]").unwrap();
+        assert_eq!(bar.style.fg, Some(MUTED));
+    }
+
+    #[test]
+    fn rich_spans_styles_insider_mark() {
+        let spans = rich_spans("0x12…34 *", Style::default().fg(FG));
+        let star = spans.iter().find(|s| s.content == "*").unwrap();
+        assert_eq!(star.style.fg, Some(WARN));
+    }
+
+    #[test]
+    fn truncate_line_clips_with_ellipsis_keeping_style() {
+        let line = Line::from(vec![
+            Span::styled("abcd", Style::default().fg(ACID)),
+            Span::styled("ef", Style::default().fg(MUTED)),
+        ]);
+        // "abcd" fits the 4-char budget; the ellipsis takes the cut point
+        // with the style of the span it replaced.
+        let cut = truncate_line(line, 5);
+        assert_eq!(cut.spans[0].content, "abcd");
+        assert_eq!(cut.spans[0].style.fg, Some(ACID));
+        assert_eq!(cut.spans[1].content, "…");
+        assert_eq!(cut.spans[1].style.fg, Some(MUTED));
+
+        // Mid-span cut keeps the partial prefix styled like the rest.
+        let line = Line::from(vec![
+            Span::styled("abcdef", Style::default().fg(ACID)),
+            Span::styled("gh", Style::default().fg(MUTED)),
+        ]);
+        let cut = truncate_line(line, 4);
+        assert_eq!(cut.spans[0].content, "abc");
+        assert_eq!(cut.spans[0].style.fg, Some(ACID));
+        assert_eq!(cut.spans[1].content, "…");
+
+        let short = Line::from("hi");
+        assert_eq!(truncate_line(short, 5).spans.len(), 1);
+        assert_eq!(truncate_line(Line::from("x"), 0).spans.len(), 0);
+    }
+
+    #[test]
+    fn ellipsize_clips_long_strings() {
+        assert_eq!(ellipsize("hello", 10), "hello");
+        assert_eq!(ellipsize("hello", 3), "he…");
+        assert_eq!(ellipsize("hello", 2), "he");
+        assert_eq!(ellipsize("hello", 0), "");
+    }
+}
 
 #[cfg(test)]
 mod layout_geom_tests {
@@ -897,5 +1185,98 @@ mod layout_geom_tests {
             "OK gate={:?} treasury={:?} announce={:?} signals={:?} activity={:?} content_h={}",
             g, t, a, s, act, ch
         );
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use crate::app::App;
+    use crate::config::Config;
+    use crate::fetch::http_client;
+    use crate::model::{DexPair, Snapshot};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// A board with enough real-ish data to exercise every styling path:
+    /// accents, mixed deltas, disagreement flags, and badges.
+    fn test_app() -> App {
+        let mut app = App::new(Config::from_env(), http_client().unwrap());
+        app.snap = Snapshot {
+            token: crate::model::Token {
+                symbol: "ANSEM".into(),
+                name: "The Black Bull".into(),
+                price_usd: Some(0.21),
+                holder_count: Some(1234),
+                is_verified: Some(true),
+                launchpad: Some("pump.fun".into()),
+                primary_pair: Some(DexPair {
+                    dex_id: "raydium".into(),
+                    quote_symbol: "USDC".into(),
+                    liq_usd: Some(1_000_000.0),
+                    ..Default::default()
+                }),
+                stats_24h: crate::model::WindowStats {
+                    price_change: Some(3.2),
+                    buy_volume: Some(500_000.0),
+                    sell_volume: Some(300_000.0),
+                    organic_buyers: Some(120),
+                    net_buyers: Some(45),
+                    traders: Some(900),
+                    ..Default::default()
+                },
+                stats_1h: crate::model::WindowStats {
+                    price_change: Some(-1.5), // ▼ mixed with ▲ elsewhere
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            gecko_token: crate::model::GeckoToken {
+                // >1% divergence → amber (!) on the PRICE card
+                price_usd: Some(0.25),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        app
+    }
+
+    #[test]
+    fn renders_pane_accents_deltas_flags_and_badges() {
+        let app = test_app();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|f| crate::ui::draw(f, &app))
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+
+        let find = |pred: &dyn Fn(&ratatui::buffer::Cell) -> bool| {
+            buf.content.iter().any(pred)
+        };
+        // LIQUIDITY title carries its cyan accent (idle title, not focused).
+        assert!(
+            find(&|c| c.symbol() == "L" && c.fg == CYAN),
+            "treasury accent missing"
+        );
+        // The PRICE card hero is bold acid.
+        assert!(find(&|c| c.symbol() == "$" && c.fg == ACID && c.modifier.contains(Modifier::BOLD)));
+        // Gecko price divergence flagged amber.
+        assert!(
+            find(&|c| c.symbol() == "!" && c.fg == WARN),
+            "(!) disagreement flag missing"
+        );
+        // Mixed deltas color each arrow: ▼ is BAD even when ▲ exists nearby.
+        assert!(
+            find(&|c| c.symbol() == "▼" && c.fg == BAD),
+            "down delta should be BAD"
+        );
+        assert!(find(&|c| c.symbol() == "▲" && c.fg == ACID));
+        // Verified badge chip renders acid.
+        assert!(
+            find(&|c| c.symbol() == "v" && c.fg == ACID),
+            "verified badge missing"
+        );
+        // Market head uses the real symbol.
+        assert!(find(&|c| c.symbol() == "A" && c.fg == ACID && c.modifier.contains(Modifier::BOLD)));
     }
 }

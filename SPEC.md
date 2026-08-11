@@ -1,84 +1,102 @@
-# bullboard — terminal stalker for Bull.inf / $ANSEM / @blknoiz06
+# bullboard — terminal dashboard for $ANSEM / @blknoiz06
 
 ## Outcome (must match)
 
-A **professional multi-pane terminal dashboard** in the spirit of Surfboard (MAXPANE):
-dark matrix aesthetic, live-updating panes, keyboard-driven. Installable via **pipx**
-(primary) and optionally **npm** (thin launcher).
+A **professional multi-pane terminal dashboard** in the spirit of Surfboard
+(MAXPANE): dark matrix aesthetic, live-updating panes, keyboard + mouse
+driven. A single static Rust binary, installable via `cargo install`; a thin
+npm launcher is optional.
 
 ```
-┌─ BULLBOARD · $ANSEM · parity · feed · activity ──────────────────────────────┐
-│ BULL GATE          │ TREASURY / MINT        │ STAKE / FEES        │ ANSEM MCAP │
-│ min wallet, onchain│ pubkey, mint short     │ fee split, pool     │ price/fdv  │
-├────────────────────┴────────────────────────┼─────────────────────┴───────────┤
-│ ANNOUNCE FEED · @blknoiz06 · last N ago     │ SIGNALS                         │
-│ MM-DD HH:MM POST  tweet text…               │ · SOLANA OK · markets live      │
-│ …                                           │ · liquidity · 24h activity      │
-│                                             ├─────────────────────────────────┤
-│                                             │ INFERENCE ACTIVITY              │
-│                                             │ time model cost ANSEM           │
-├─────────────────────────────────────────────┴─────────────────────────────────┤
-│ ANSEM MARKET                                │ BULL.INF DESK                   │
-│ price 24hΔ vol pool spark                   │ reqs sellers models liq         │
-└───────────────────────────────────────────────────────────────────────────────┘
- q quit · r refresh · n next feed · tab focus · updated Xs ago · bullboard v0.x
+   BULLBOARD · ANSEM $0.2090 · 24h ▲ +19.22% · vol $20.25M · src 8/8
+ ┌ PRICE ────────┐ ┌ LIQUIDITY ─────────┐ ┌ SAFETY ───────────┐ ┌ SUPPLY ──────────┐
+ │    $0.2090    │ │      $2.13M        │ │      CLEAN        │ │     142,175      │
+ │ 24h ▲ +19.22% │ │ PUMPSWAP ANSEM/SOL │ │ mint off·freezeoff│ │ mcap $208.99M    │
+ │ vol $20.24M   │ │    FnzKY…8L3CC     │ │ rug 43·insiders 12│ │ circ 999.82M     │
+ │  gecko $0.2091│ │  gecko $2.80M (!)  │ │   lp 82% locked   │ │   fdv $208.99M   │
+ ┌ ANNOUNCE · @blknoiz06 · 9s · last 3h · ↕ ─────────────┐  SIGNALS · ↕
+ │ 08-11 06:27 POST RT @Saint10Fourteen no disrespect…    │  ● MINT AUTH  disabled·safe
+ │   [ view tweet ]                                       │  ● FREEZE AUTH disabled·safe
+ │ 08-11 06:08 POST RT @Jxjethro this szn and forever…    │  ◐ LIQUIDITY  $2.13M deep
+ │                                                        │  ┌ ACTIVITY · ↕ ────────────┐
+ └────────────────────────────────────────────────────────┘  │ 5m B $12.35K S $10.27K … │
+  MARKET · ↕                                  HOLDERS · ↕    │ 24h org 495 · net 3409   │
+  ANSEM $0.2090 24h ▲ +19.22% [verified]     142,175 1h …    │ meteora 6e7V… 44d liq …  │
+  5m ▲ 1h ▼ 6h ▲  24h low/high              top10 62.7% ▓    │ gecko 6 pools (!)       │
+  price ▂▂▃▃▄▅▇█  vol ▁▁▂▃▄▆              dist 2.8/3.5/31   └─────────────────────────┘
+ q quit · r refresh · n feed · t alerts · ? help · o open · tab · j/k   updated 2s · PRICE · alerts:off · v0.4.0
 ```
 
 ## Identity
 
 | Field | Value |
 |-------|--------|
-| Package | `bullboard` |
-| CLI | `bullboard` |
+| Package | `bullboard` (Rust, edition 2021) |
+| CLI | `bullboard` (flags: `--api-base`, `--handle`, `--once`) |
 | Tracked token | **$ANSEM** mint `9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump` |
 | Tracked X | **@blknoiz06** (override: `BULLBOARD_X_HANDLE`) |
 | API base | `https://api.bullinf.fun` (override: `BULLBOARD_API_BASE`) |
-| Brand | ink `#0a0b09`, acid `#c8f542`, mono (IBM Plex Mono / system mono) |
+| Brand | canvas `#050604`, panel `#161812`, acid `#c8f542`, per-pane accents |
 
 ## Data sources (public only — no auth)
 
-| Pane | Source |
-|------|--------|
-| Gate / treasury / mint | `GET /api/network` + `/api/config` |
-| ANSEM price / mcap / spark | `GET /api/token-price` + `/api/token-ohlc?interval=1h&limit=48` |
-| Stake / fees | `GET /api/stake/stats` |
-| Announce feed | Nitter RSS for `@blknoiz06` (+ optional second handle `bullinference`) |
-| Signals | Derived health from network + stats + markets |
-| Inference activity | `GET /api/markets/feed?limit=20` |
-| Desk KPIs | `GET /api/stats` + `/api/stats/daily` |
-| Top models | `GET /api/markets` (sorted by liquidity) |
+| Pane / data | Source |
+|-------------|--------|
+| Price, 24h change, OHLC (sparklines, 24h high/low) | Bull.inf `GET /api/token-price` + `GET /api/token-ohlc?interval=1h&limit=48` |
+| Token details, window stats, audit | Jupiter `GET https://lite-api.jup.ag/tokens/v2/search?query={mint}` |
+| Second-opinion price / liquidity / volume / mcap | GeckoTerminal `…/tokens/{mint}` + `…/tokens/{mint}/pools` + `…/tokens/{mint}/info` (holder distribution) |
+| Rug check, LP lock, insiders, top holders | RugCheck `GET https://api.rugcheck.xyz/v1/tokens/{mint}/report` |
+| DEX pairs (liquidity, volume, pool age, quote) | DexScreener `GET https://api.dexscreener.com/latest/dex/tokens/{mint}` |
+| Announce feed | Nitter mirrors (public RSS, fresh-cursor bypass, circuit breaker) |
 
-Fallback: DexScreener token endpoint if Bull price is stale.
+Resilience: every endpoint gets one retry on 5xx/429/timeout; a failed poll
+keeps the last good values (`Snapshot::merge_stale`) so the board never
+flickers `—`; the header shows a live `src n/m` health counter.
 
 ## UX keys
 
-- `q` / `Ctrl+C` — quit
-- `r` — force refresh all
-- `n` — cycle announce feed handle (blknoiz06 ↔ bullinference ↔ both)
-- `tab` — cycle focused pane (if Textual)
-- Auto-refresh every **15s** (price/stats) / **60s** (tweets)
+- `q` / `Esc` / `Ctrl+C` — quit (panic hook restores the terminal on crash)
+- `?` / `h` — help overlay (full key + mouse reference)
+- `r` — force refresh all (background — input never blocks)
+- `n` — refresh announce feed, reset scroll
+- `t` — toggle desktop notifications
+- `tab` / `shift-tab`, `1`–`9` — pane focus
+- `j`/`k`/arrows, `space`/`f`/`b`, `g`/`G` — scroll focused pane
+- `enter` / `o` — open tweet in browser
+- mouse — hover highlight, click focus, wheel scroll, click `[ view tweet ]`
+
+Auto-refresh: data every **15s**, feed every **30s** (`BULLBOARD_FEED_SECS`,
+min 5).
+
+## Architecture
+
+- `src/config.rs` — env config, palette constants
+- `src/model.rs` — data model, `Snapshot::merge_stale` keep-last-good
+- `src/fetch.rs` — HTTP (retry-once), JSON/RSS parsing, feed circuit breaker
+- `src/app.rs` — app state, background refresh channel, pane line builders,
+  notifications, event loop
+- `src/ui.rs` — ratatui layout + rendering (accents, delta coloring, badges,
+  truncation, help overlay)
+- `src/format.rs` — number/date/sparkline/bar formatters
 
 ## Success criteria
 
-1. `pipx install .` (or `pip install -e .`) → `bullboard` launches full TUI
-2. Live $ANSEM price + 24h change visible within 2s of launch
-3. @blknoiz06 tweets (or clear empty/fallback state) in announce pane
-4. Inference feed shows recent Bull.inf completions when API has data
-5. Resize-safe layout (min 100×30 recommended)
-6. No crash if one endpoint fails — pane shows `—` / error badge
-7. README with one-liner install matching Surfboard tweet energy
+1. `cargo install --git …` → `bullboard` launches the full TUI
+2. First frame draws instantly; live price visible as soon as the first fetch lands
+3. @blknoiz06 tweets (or clear empty/fallback state) in the announce pane
+4. Cross-checks: Gecko vs primary price (`(!)` >1%), Gecko vs Dex liquidity (`(!)` >25%)
+5. Resize-safe layout with stacking breakpoints; graceful at ≥ 52×16
+6. No crash if one endpoint fails — pane shows `—`, last good values persist
+7. Zero clippy warnings, unit tests green
 
 ## Stack
 
-- Python 3.10+
-- `textual` (multi-pane TUI)
-- `httpx` (async HTTP)
-- stdlib RSS/XML for Nitter
+- Rust 2021: ratatui 0.29, crossterm, tokio, reqwest (rustls), quick-xml,
+  serde_json, chrono, clap, anyhow
 
 ## Anti-goals
 
 - No wallet connect / signing
-- No admin endpoints
-- No Surplus branding
+- No accounts, passwords, or API keys
+- No deploy / server component — reads public data only
 - No fake precision KPIs
-- No purple SaaS look

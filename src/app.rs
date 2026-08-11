@@ -1,13 +1,15 @@
-use crate::config::{Config, FeedMode, REFRESH_DATA_SECS};
+use crate::config::{Config, REFRESH_DATA_SECS};
 use crate::fetch::{fetch_announce, fetch_snapshot, http_client, FeedHealth};
 use crate::format::{
-    ago, bar, clock_mmdd_hhmm, delta_str, fmt_compact, fmt_int, fmt_usd, short_addr, sparkline,
+    ago, bar, clock_mmdd_hhmm, delta_str, fmt_compact, fmt_int, fmt_usd, is_post_line, short_addr,
+    sparkline,
 };
 use crate::model::{Snapshot, Tweet};
 use crate::ui::{self, Focus, PaneAreas, PaneId, NUM_PANES};
 use anyhow::Result;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -23,18 +25,40 @@ use std::collections::{HashMap, HashSet};
 use std::io::stdout;
 use std::process::Command;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
-use crate::config::{ACID, MUTED};
+use crate::config::{ACID, BAD, MUTED, WARN};
 
 /// On-screen control under each announce post (click / Enter / `o` opens URL).
 /// Leading spaces keep the acid chip left-aligned under the post body.
 pub const VIEW_TWEET_BTN: &str = "  [ view tweet ]  ";
 
+/// Result of a background refresh — the app loop drains these every tick so
+/// input never blocks on the network.
+enum RefreshMsg {
+    /// Fresh market/on-chain snapshot (tweets reattached on receipt).
+    Data(Box<Snapshot>),
+    /// Fresh announce feed plus the circuit-breaker state that poll produced.
+    Feed(Vec<Tweet>, Option<String>, FeedHealth),
+}
+
+/// The data endpoints `snap.errors` is keyed by — drives the `src n/m` health
+/// counter in the header.
+const SOURCE_KEYS: [&str; 8] = [
+    "price",
+    "ohlc",
+    "jupiter",
+    "gecko",
+    "gecko-token",
+    "gecko-pools",
+    "rugcheck",
+    "dexscreener",
+];
+
 pub struct App {
     pub cfg: Config,
     pub client: Client,
     pub snap: Snapshot,
-    pub feed_mode: FeedMode,
     pub focus: Focus,
     /// scroll offset (lines) per pane
     pub scroll: HashMap<PaneId, u16>,
@@ -46,13 +70,25 @@ pub struct App {
     pub hover_pane: Option<PaneId>,
     /// Announce post under the mouse (soft highlight; not the same as selected).
     pub hover_tweet: Option<usize>,
+    /// True while a data refresh is in flight (header shows a spinner).
     pub loading: bool,
     pub should_quit: bool,
+    /// Last user-facing message ("updated 5s ago", "opened tweet #2", …) —
+    /// rendered in the footer's right segment.
     pub status: String,
     /// Desktop notifications on (`t` toggles; BULLBOARD_NOTIFY sets initial).
     pub notify_enabled: bool,
     /// Circuit-breaker state per feed mirror (auto-skips blocking mirrors).
     pub feed_health: FeedHealth,
+    /// `?`/`h` help overlay.
+    pub show_help: bool,
+    /// Background refreshes deliver results here.
+    refresh_rx: mpsc::UnboundedReceiver<RefreshMsg>,
+    /// Clone handed to spawned refresh tasks.
+    refresh_tx: mpsc::UnboundedSender<RefreshMsg>,
+    /// One data / feed refresh in flight at a time (no pile-up).
+    data_busy: bool,
+    feed_busy: bool,
     last_data: Instant,
     last_feed: Instant,
     /// Tweet ids already announced; a new id fires a desktop notification.
@@ -62,11 +98,11 @@ pub struct App {
 impl App {
     pub fn new(cfg: Config, client: Client) -> Self {
         let notify = cfg.notify;
+        let (refresh_tx, refresh_rx) = mpsc::unbounded_channel();
         Self {
             cfg,
             client,
             snap: Snapshot::default(),
-            feed_mode: FeedMode::Primary,
             focus: Focus::default(),
             scroll: HashMap::new(),
             pane_areas: PaneAreas::default(),
@@ -78,6 +114,11 @@ impl App {
             status: "loading…".into(),
             notify_enabled: notify,
             feed_health: FeedHealth::default(),
+            show_help: false,
+            refresh_rx,
+            refresh_tx,
+            data_busy: false,
+            feed_busy: false,
             last_data: Instant::now() - Duration::from_secs(999),
             last_feed: Instant::now() - Duration::from_secs(999),
             seen_tweets: HashSet::new(),
@@ -95,7 +136,7 @@ impl App {
     /// Visual line count for a pane given its current width (wrap-aware).
     fn visual_line_count(&self, id: PaneId, area: Rect) -> usize {
         let lines = self.lines_for(id);
-        if !matches!(id, PaneId::Announce | PaneId::Activity) {
+        if id != PaneId::Announce {
             return lines.len();
         }
         let content_w = ui::pane_content_width(area);
@@ -109,7 +150,7 @@ impl App {
                 if chars == 0 {
                     1
                 } else {
-                    ((chars + content_w - 1) / content_w).max(1)
+                    chars.div_ceil(content_w).max(1)
                 }
             })
             .sum()
@@ -187,33 +228,72 @@ impl App {
         self.announce_hit(content_row, inner_w as usize).0
     }
 
-    pub async fn refresh_data(&mut self) {
+    /// Kick off a background data refresh; results arrive via `refresh_rx`.
+    /// Input never blocks on the network — the loop drains the channel.
+    pub fn trigger_data(&mut self) {
+        if self.data_busy {
+            return;
+        }
+        self.data_busy = true;
         self.loading = true;
-        let tweets = self.snap.tweets.clone();
-        let terr = self.snap.tweet_error.clone();
-        self.snap = fetch_snapshot(&self.client, &self.cfg).await;
-        self.snap.tweets = tweets;
-        self.snap.tweet_error = terr;
-        self.last_data = Instant::now();
-        self.loading = false;
-        self.status = format!("updated {}", ago(self.snap.fetched_at.as_deref()));
+        let cfg = self.cfg.clone();
+        let client = self.client.clone();
+        let tx = self.refresh_tx.clone();
+        tokio::spawn(async move {
+            let snap = fetch_snapshot(&client, &cfg).await;
+            let _ = tx.send(RefreshMsg::Data(Box::new(snap)));
+        });
     }
 
-    pub async fn refresh_feed(&mut self) {
-        let (tweets, err) =
-            fetch_announce(&self.client, &self.cfg, self.feed_mode, 40, &mut self.feed_health)
-                .await;
-        // Nitter mirrors are flaky: if a poll comes back empty with an error,
-        // keep the last good feed so the pane never blanks on a hiccup.
-        if tweets.is_empty() && err.is_some() && !self.snap.tweets.is_empty() {
-            self.snap.tweet_error = err;
-        } else {
-            self.notify_new_tweets(&tweets);
-            self.snap.tweets = tweets;
-            self.snap.tweet_error = err;
+    /// Kick off a background announce-feed refresh. The circuit-breaker state
+    /// lives in the app; the task gets a clone and hands the updated state
+    /// back inside the message so tripped mirrors stay skipped across polls.
+    pub fn trigger_feed(&mut self) {
+        if self.feed_busy {
+            return;
         }
-        self.last_feed = Instant::now();
-        // reset announce scroll on feed cycle only if empty scroll keep
+        self.feed_busy = true;
+        let cfg = self.cfg.clone();
+        let client = self.client.clone();
+        let tx = self.refresh_tx.clone();
+        let mut health = self.feed_health.clone();
+        tokio::spawn(async move {
+            let (tweets, err) = fetch_announce(&client, &cfg, 40, &mut health).await;
+            let _ = tx.send(RefreshMsg::Feed(tweets, err, health));
+        });
+    }
+
+    /// Apply one background refresh result (called every tick while queued).
+    fn handle_msg(&mut self, msg: RefreshMsg) {
+        match msg {
+            RefreshMsg::Data(boxed) => {
+                let old = std::mem::take(&mut self.snap);
+                let merged = Snapshot::merge_stale(*boxed, &old);
+                let mut merged = merged;
+                // fetch_snapshot doesn't know about the feed — reattach it.
+                merged.tweets = old.tweets;
+                merged.tweet_error = old.tweet_error;
+                self.snap = merged;
+                self.last_data = Instant::now();
+                self.data_busy = false;
+                self.loading = false;
+                self.status = format!("updated {}", ago(self.snap.fetched_at.as_deref()));
+            }
+            RefreshMsg::Feed(tweets, err, health) => {
+                // Nitter mirrors are flaky: if a poll comes back empty with an
+                // error, keep the last good feed so the pane never blanks.
+                if tweets.is_empty() && err.is_some() && !self.snap.tweets.is_empty() {
+                    self.snap.tweet_error = err;
+                } else {
+                    self.notify_new_tweets(&tweets);
+                    self.snap.tweets = tweets;
+                    self.snap.tweet_error = err;
+                }
+                self.feed_health = health;
+                self.last_feed = Instant::now();
+                self.feed_busy = false;
+            }
+        }
     }
 
     /// Fire desktop notifications for announce tweets seen for the first time
@@ -243,11 +323,6 @@ impl App {
         }
     }
 
-    pub async fn refresh_all(&mut self) {
-        self.refresh_data().await;
-        self.refresh_feed().await;
-    }
-
     pub fn lines_for(&self, id: PaneId) -> Vec<String> {
         match id {
             PaneId::Gate => self.lines_price_flow(),
@@ -262,22 +337,60 @@ impl App {
         }
     }
 
-    /// Surfboard-style KPI: 3 lines (hero · detail · whisper) so content_h≥4 yields float.
-    fn lines_price_flow(&self) -> Vec<String> {
+    /// Best available 24h volume across sources (Jupiter → pair → Bull API → Gecko).
+    fn vol24(&self) -> Option<f64> {
         let t = &self.snap.token;
-        let s24 = &t.stats_24h;
-        let pair = t.primary_pair.as_ref();
-        let vol24 = s24
+        let p = t.primary_pair.as_ref();
+        t.stats_24h
             .buy_volume
-            .zip(s24.sell_volume)
+            .zip(t.stats_24h.sell_volume)
             .map(|(b, s)| b + s)
-            .or_else(|| pair.and_then(|p| p.vol_h24));
+            .or_else(|| p.and_then(|x| x.vol_h24))
+            .or_else(|| self.snap.ohlc_stat_f("volume_24h"))
+            .or(self.snap.gecko_token.vol_24h)
+    }
+
+    /// Best available liquidity across sources.
+    fn liq_usd(&self) -> Option<f64> {
+        let t = &self.snap.token;
+        t.total_liquidity()
+            .or_else(|| self.snap.ohlc_stat_f("liquidity_usd"))
+            .or_else(|| self.snap.gecko_liq_usd())
+    }
+
+    /// (healthy, total) data sources — drives the `src n/m` header counter.
+    fn sources_health(&self) -> (usize, usize) {
+        let bad = SOURCE_KEYS
+            .iter()
+            .filter(|k| self.snap.errors.contains_key(**k))
+            .count();
+        (SOURCE_KEYS.len() - bad, SOURCE_KEYS.len())
+    }
+
+    /// The token's display symbol, with the ANSEM default for custom mints.
+    fn symbol(&self) -> &str {
+        let s = self.snap.token.symbol.trim();
+        if s.is_empty() {
+            "ANSEM"
+        } else {
+            s
+        }
+    }
+
+    /// KPI card: hero · 24h · vol · gecko cross-check (amber `(!)` when the
+    /// two price sources disagree by more than 1%).
+    fn lines_price_flow(&self) -> Vec<String> {
+        let mut gk = format!("gecko {}", fmt_usd(self.snap.gecko_token.price_usd));
+        if let (Some(px), Some(g)) = (self.snap.price_usd(), self.snap.gecko_token.price_usd) {
+            if px != 0.0 && (g - px).abs() / px.abs() > 0.01 {
+                gk.push_str(" (!)");
+            }
+        }
         vec![
             fmt_usd(self.snap.price_usd()),
             format!("24h {}", delta_str(self.snap.change_24h())),
-            format!("vol {}", fmt_usd(vol24)),
-            // Second-opinion price, always visible (not just on divergence).
-            format!("gecko {}", fmt_usd(self.snap.gecko_token.price_usd)),
+            format!("vol {}", fmt_usd(self.vol24())),
+            gk,
         ]
     }
 
@@ -311,6 +424,13 @@ impl App {
             Some(r) if r > 0.0 => format!("{pools_s} · rug {}", fmt_usd(Some(r))),
             _ => format!("{pools_s} · primary {}", fmt_usd(p.liq_usd)),
         };
+        // Line 2: DEX + the pair it quotes, e.g. "PUMPSWAP ANSEM/SOL".
+        let quote = p.quote_symbol.trim();
+        let pair_line = if quote.is_empty() || quote == "?" {
+            p.dex_id.to_uppercase()
+        } else {
+            format!("{} {}/{}", p.dex_id.to_uppercase(), self.symbol(), quote)
+        };
         // Second-opinion liquidity with the same (!) disagreement flag the
         // Activity pane uses, so the card and the rail agree.
         let mut gk = String::new();
@@ -323,11 +443,7 @@ impl App {
         }
         let mut lines = vec![
             fmt_usd(total),
-            format!(
-                "{} · {}",
-                p.dex_id.to_uppercase(),
-                short_addr(&p.pair_address, 5)
-            ),
+            pair_line,
             whisper,
         ];
         if !gk.is_empty() {
@@ -352,17 +468,30 @@ impl App {
             .lp_locked_pct
             .map(|p| format!("{p:.0}%"))
             .unwrap_or_else(|| "—".into());
+        let rug = t
+            .rug_score
+            .map(|s| format!("rug {s:.0}"))
+            .unwrap_or_else(|| "rug —".into());
+        let insiders = t
+            .graph_insiders
+            .map(|n| format!("insiders {n}"))
+            .unwrap_or_else(|| "insiders —".into());
+        // Dev holdings ≥ 10% is a real rug-watch signal — badge it.
+        let mut dev_badge = String::new();
+        if let Some(p) = t.dev_balance_pct {
+            if p >= 10.0 {
+                dev_badge = format!(" [dev {p:.0}%]");
+            }
+        }
         vec![
             hero,
             format!(
                 "mint {} · freeze {}",
-                if mint_ok { "off" } else { "ON" },
-                if freeze_ok { "off" } else { "ON" }
+                if mint_ok { "off" } else { "on" },
+                if freeze_ok { "off" } else { "on" }
             ),
-            t.rug_score
-                .map(|s| format!("rug {s:.0}"))
-                .unwrap_or_else(|| "rug —".into()),
-            format!("lp {lp} locked"),
+            format!("{rug} · {insiders}"),
+            format!("lp {lp} locked{dev_badge}"),
         ]
     }
 
@@ -372,17 +501,33 @@ impl App {
         let mcap = fmt_usd(
             t.mcap
                 .or_else(|| self.snap.ohlc_stat_f("market_cap"))
-                .or_else(|| self.snap.gecko_token.market_cap),
+                .or(self.snap.gecko_token.market_cap),
         );
         let fdv = fmt_usd(
             t.fdv
-                .or_else(|| self.snap.gecko_token.fdv)
+                .or(self.snap.gecko_token.fdv)
                 .or_else(|| t.primary_pair.as_ref().and_then(|p| p.fdv)),
         );
+        // Badges live on the MARKET head (wide pane); cards stay terse.
+        let circ = t
+            .circ_supply
+            .map(|c| fmt_compact(Some(c)))
+            .unwrap_or_else(|| "—".into());
+        // circ == total (no burn) reads as "circ 999.82M / 999.82M" — show
+        // just the one number when they're effectively the same.
+        let circ_line = match (t.circ_supply, t.total_supply) {
+            (Some(c), Some(total)) if total > 0.0 && ((total - c) / total).abs() < 0.01 => {
+                format!("circ {circ}")
+            }
+            (Some(_), Some(total)) => format!("circ {circ} / {}", fmt_compact(Some(total))),
+            (Some(_), None) => format!("circ {circ}"),
+            (None, Some(total)) => format!("circ — / {}", fmt_compact(Some(total))),
+            (None, None) => "circ —".into(),
+        };
         vec![
             holders,
             format!("mcap {mcap}"),
-            format!("circ {}", fmt_compact(t.circ_supply)),
+            circ_line,
             format!("fdv {fdv}"),
         ]
     }
@@ -486,6 +631,14 @@ impl App {
             None => lines.push("◐ LP LOCKED    n/a".into()),
         }
 
+        // Dev wallet concentration — a fat dev balance is a rug-watch flag.
+        match t.dev_balance_pct {
+            Some(p) if p >= 10.0 => lines.push(format!("○ DEV CONC    {p:.1}% high")),
+            Some(p) if p >= 5.0 => lines.push(format!("◐ DEV CONC    {p:.1}%")),
+            Some(p) => lines.push(format!("● DEV CONC    {p:.1}%")),
+            None => {}
+        }
+
         // Cap at 6 high-signal rows; rug/price/organic/risks only if room.
         if lines.len() < 6 {
             match t.rugged {
@@ -520,7 +673,8 @@ impl App {
         let s = &self.snap;
         let t = &s.token;
         let mut lines = Vec::new();
-        // One row per window (not two).
+        // One row per window (not two). Right-aligned columns so the legs
+        // line up across windows instead of trailing off ragged.
         for (label, w) in [
             ("5m", &t.stats_5m),
             ("1h", &t.stats_1h),
@@ -528,15 +682,30 @@ impl App {
             ("24h", &t.stats_24h),
         ] {
             lines.push(format!(
-                "{label:<3} B {}  S {}  {}B/{}S  tr {}",
+                "{label:<3} B {:>8}  S {:>8}  {:>6}B/{:<6}S",
                 fmt_usd(w.buy_volume),
                 fmt_usd(w.sell_volume),
                 fmt_int(w.buys),
                 fmt_int(w.sells),
-                fmt_int(w.traders)
             ));
         }
         lines.push(String::new());
+        // 24h buyer-quality summary: organic vs net split is the strongest
+        // "is this real demand" signal; trader count completes the row.
+        let s24 = &t.stats_24h;
+        if s24.organic_buyers.is_some() || s24.net_buyers.is_some() || s24.traders.is_some() {
+            let mut sum = "24h ".to_string();
+            if let (Some(o), Some(n)) = (s24.organic_buyers, s24.net_buyers) {
+                sum.push_str(&format!("org {o} · net {n}"));
+            }
+            if let Some(tr) = s24.traders {
+                if sum != "24h " {
+                    sum.push_str(" · ");
+                }
+                sum.push_str(&format!("tr {}", fmt_int(Some(tr))));
+            }
+            lines.push(sum);
+        }
         // Aggregate liquidity across all pools — per DEX, biggest first.
         if let Some(tot) = t.total_liquidity() {
             let pools = t.pairs.len();
@@ -598,21 +767,12 @@ impl App {
         let price_spark = sparkline(&s.closes(), 28);
         let vol_spark = sparkline(&s.volumes(), 28);
         let p = t.primary_pair.as_ref();
-        let vol24 = t
-            .stats_24h
-            .buy_volume
-            .zip(t.stats_24h.sell_volume)
-            .map(|(b, se)| b + se)
-            .or_else(|| p.and_then(|x| x.vol_h24))
-            .or_else(|| s.ohlc_stat_f("volume_24h"))
-            .or_else(|| s.gecko_token.vol_24h);
-        let liq = t
-            .total_liquidity()
-            .or_else(|| s.ohlc_stat_f("liquidity_usd"))
-            .or_else(|| s.gecko_liq_usd());
+        let vol24 = self.vol24();
+        let liq = self.liq_usd();
+        let symbol = self.symbol();
         // Second-opinion price: surface it when sources diverge > 1%.
         let mut head = format!(
-            "ANSEM {}   24h {}",
+            "{symbol} {}   24h {}",
             fmt_usd(s.price_usd()),
             delta_str(s.change_24h())
         );
@@ -620,6 +780,16 @@ impl App {
             if px != 0.0 && ((gk - px).abs() / px.abs()) > 0.01 {
                 head.push_str(&format!(" · gecko {}", fmt_usd(Some(gk))));
             }
+        }
+        // Badge chips — verified / launchpad / graduated read as trust marks.
+        if t.is_verified == Some(true) {
+            head.push_str(" [verified]");
+        }
+        if let Some(lp) = &t.launchpad {
+            head.push_str(&format!(" [{lp}]"));
+        }
+        if t.graduated_at.is_some() {
+            head.push_str(" [graduated]");
         }
         // ≤6 lines: price+24h, windows, 24h range, vol·liq, price spark, vol spark
         let (hi, lo) = s.range_24h();
@@ -651,7 +821,7 @@ impl App {
             ];
         }
         let top10 = t.top10_pct.or(t.top_holders_pct);
-        // count + deltas, top10 bar, blank, top 3 holders only
+        // count + deltas, top10 bar, distribution bands, blank, top holders
         let mut lines = vec![
             format!(
                 "{}  1h {}  6h {}  24h {}",
@@ -667,6 +837,13 @@ impl App {
             ),
             String::new(),
         ];
+        // Gecko's holder-distribution bands — how much of the supply sits in
+        // the top 40 wallets vs the rest (concentration = rug risk).
+        if let (Some(a), Some(b), Some(c)) = (t.top11_20_pct, t.top21_40_pct, t.rest_pct) {
+            lines.push(format!(
+                "dist  11-20 {a:.1}% · 21-40 {b:.1}% · rest {c:.1}%"
+            ));
+        }
         for (i, th) in t.top_holders.iter().take(4).enumerate() {
             let pct = th
                 .pct
@@ -687,46 +864,67 @@ impl App {
         lines
     }
 
-    pub fn header_text(&self) -> String {
-        let price = fmt_usd(self.snap.price_usd());
-        let ch = delta_str(self.snap.change_24h());
-        format!(" BULLBOARD · ANSEM {price} · {ch} ")
-    }
-
-    /// Surfboard ticker: muted chrome, acid only on price + change.
+    /// Surfboard ticker: muted chrome, acid only on price + change. Richer in
+    /// v0.4: symbol, 24h delta colored by direction, 24h volume, and a live
+    /// `src n/m` health counter (amber when a source is down).
     pub fn header_line(&self) -> Line<'static> {
+        let symbol = self.symbol();
         let price = fmt_usd(self.snap.price_usd());
         let ch = delta_str(self.snap.change_24h());
-        Line::from(vec![
+        let delta_style = if ch.starts_with('▲') {
+            Style::default().fg(ACID).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(BAD).add_modifier(Modifier::BOLD)
+        };
+        let (src_ok, src_total) = self.sources_health();
+        let src_style = if src_ok < src_total {
+            Style::default().fg(WARN)
+        } else {
+            Style::default().fg(MUTED)
+        };
+        let mut spans = vec![
             Span::styled(
-                " BULLBOARD · ANSEM ".to_string(),
+                format!(" BULLBOARD · {symbol} "),
                 Style::default().fg(MUTED),
             ),
             Span::styled(
                 price,
                 Style::default().fg(ACID).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" · ".to_string(), Style::default().fg(MUTED)),
+            Span::styled(" · 24h ".to_string(), Style::default().fg(MUTED)),
+            Span::styled(ch, delta_style),
             Span::styled(
-                ch,
-                Style::default().fg(ACID).add_modifier(Modifier::BOLD),
+                format!(" · vol {} ", fmt_usd(self.vol24())),
+                Style::default().fg(MUTED),
             ),
-            Span::styled(" ".to_string(), Style::default().fg(MUTED)),
-        ])
+            Span::styled(
+                format!("· src {src_ok}/{src_total} "),
+                src_style,
+            ),
+        ];
+        if self.loading {
+            spans.push(Span::styled("⟳ ".to_string(), Style::default().fg(MUTED)));
+        }
+        Line::from(spans)
     }
 
-    pub fn footer_text(&self) -> String {
-        let updated = ago(self.snap.fetched_at.as_deref());
+    /// Footer left segment: the key shortcuts (full reference in the `?` overlay).
+    pub fn footer_keys(&self) -> &'static str {
+        " q quit · r refresh · n feed · t alerts · ? help · o open · tab · j/k "
+    }
+
+    /// Footer right segment: live status — last action, focused pane, alert
+    /// toggle, and version.
+    pub fn footer_status(&self) -> String {
         let pane = self.focus.pane().title();
         let alerts = if self.notify_enabled { "on" } else { "off" };
         format!(
-            " q quit · r refresh · n feed · t alerts · o open · tab next · j/k scroll · {} · {} · alerts:{alerts} · v{} ",
-            updated,
+            "{} · {} · alerts:{alerts} · v{}",
+            self.status,
             pane,
             env!("CARGO_PKG_VERSION"),
         )
     }
-
 
     pub fn announce_title(&self) -> String {
         let last = self
@@ -745,54 +943,10 @@ impl App {
             String::new()
         };
         format!(
-            "ANNOUNCE FEED · @{} · updated {}s · last {last}{mirrors}",
-            self.feed_mode.label(&self.cfg),
+            "ANNOUNCE · @{} · {}s · last {last}{mirrors}",
+            self.cfg.x_handle,
             self.last_feed.elapsed().as_secs(),
         )
-    }
-
-    /// Map a content-row (already scroll-adjusted) inside the announce pane.
-    /// Returns `Some(tweet_idx)` only when the visual line is `VIEW_TWEET_BTN`.
-    /// Body rows and empty spacers return `None` (focus-only, no open).
-    fn tweet_index_at_content_row(&self, content_row: u16, content_w: usize) -> Option<usize> {
-        if content_w == 0 || self.snap.tweets.is_empty() {
-            return None;
-        }
-        let lines = self.lines_for(PaneId::Announce);
-        let mut visual_at: usize = 0;
-        let mut tweet_i: Option<usize> = None;
-        let target = content_row as usize;
-
-        for line in &lines {
-            if line.is_empty() {
-                // spacer — dead zone, never open
-                if visual_at == target {
-                    return None;
-                }
-                visual_at += 1;
-                continue;
-            }
-            if line == VIEW_TWEET_BTN {
-                // button belongs to the current tweet — only open path
-                let h = 1;
-                if target >= visual_at && target < visual_at + h {
-                    return tweet_i;
-                }
-                visual_at += h;
-                continue;
-            }
-            // post body — track which tweet owns following button; body click = no open
-            if line.contains(" POST ") {
-                tweet_i = Some(tweet_i.map(|i| i + 1).unwrap_or(0));
-            }
-            let chars = line.chars().count().max(1);
-            let h = ((chars + content_w - 1) / content_w).max(1);
-            if target >= visual_at && target < visual_at + h {
-                return None;
-            }
-            visual_at += h;
-        }
-        None
     }
 
     /// Hit-test announce content. Body click selects; button click selects + opens.
@@ -846,14 +1000,14 @@ impl App {
                 visual_at += 1;
                 continue;
             }
-            if line.contains(" POST ") {
+            if is_post_line(line) {
                 tweet_i = Some(tweet_i.map(|i| i + 1).unwrap_or(0));
             }
             let h = if line == VIEW_TWEET_BTN {
                 1
             } else {
                 let chars = line.chars().count().max(1);
-                ((chars + content_w - 1) / content_w).max(1)
+                chars.div_ceil(content_w).max(1)
             };
             if target >= visual_at && target < visual_at + h {
                 return (tweet_i, line == VIEW_TWEET_BTN);
@@ -906,14 +1060,14 @@ impl App {
                 visual_at += 1;
                 continue;
             }
-            if line.contains(" POST ") {
+            if is_post_line(line) {
                 tweet_i = Some(tweet_i.map(|i| i + 1).unwrap_or(0));
             }
             let h = if line == VIEW_TWEET_BTN {
                 1
             } else {
                 let chars = line.chars().count().max(1);
-                ((chars + content_w - 1) / content_w).max(1)
+                chars.div_ceil(content_w).max(1)
             };
             let line_end = visual_at + h;
             if line_end > scroll && line == VIEW_TWEET_BTN {
@@ -935,7 +1089,7 @@ fn open_url_in_browser(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         Command::new("open").arg(url).spawn()?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -973,7 +1127,7 @@ fn notify_desktop(title: &str, body: &str) -> Result<()> {
             esc(title)
         );
         Command::new("osascript").arg("-e").arg(script).spawn()?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "linux")]
     {
@@ -1031,6 +1185,16 @@ fn tweet_view_url(t: &Tweet) -> Option<String> {
 }
 
 pub async fn run_tui(cfg: Config) -> Result<()> {
+    // A panic must never leave the user's terminal in raw mode / alternate
+    // screen — restore it first, then let the normal hook print the panic.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let mut out = stdout();
+        let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture);
+        prev_hook(info);
+    }));
+
     let client = http_client()?;
     let mut app = App::new(cfg, client);
 
@@ -1040,11 +1204,17 @@ pub async fn run_tui(cfg: Config) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // initial fetch
-    app.refresh_all().await;
+    // Kick off the first fetches in the background — the first frame draws
+    // instantly ("loading…") instead of blocking on up to 8 API calls.
+    app.trigger_data();
+    app.trigger_feed();
 
     let tick = Duration::from_millis(100);
     let result = loop {
+        // Apply any finished background refreshes, then lay out + paint.
+        while let Ok(msg) = app.refresh_rx.try_recv() {
+            app.handle_msg(msg);
+        }
         // Layout first so hit-tests + scroll clamps match what we paint.
         let size = terminal.size()?;
         app.pane_areas = ui::layout_panes(Rect::new(0, 0, size.width, size.height));
@@ -1055,64 +1225,83 @@ pub async fn run_tui(cfg: Config) -> Result<()> {
         let timeout = tick;
         if event::poll(timeout)? {
             match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => {
-                        app.should_quit = true;
-                    }
-                    KeyCode::Char('r') => {
-                        app.refresh_all().await;
-                    }
-                    KeyCode::Char('n') => {
-                        // refresh @blknoiz06 announce only (no inference alt handle)
-                        app.set_scroll(PaneId::Announce, 0);
-                        app.refresh_feed().await;
-                    }
-                    KeyCode::Char('t') => {
-                        // Toggle desktop notifications (env sets initial state).
-                        app.notify_enabled = !app.notify_enabled;
-                        app.status = format!(
-                            "notifications {}",
-                            if app.notify_enabled { "on" } else { "off" }
-                        );
-                    }
-                    KeyCode::Tab => {
-                        app.focus = app.focus.next();
-                    }
-                    KeyCode::BackTab => {
-                        app.focus = app.focus.prev();
-                    }
-                    // Scroll focused pane (mouse wheel targets pane under cursor instead).
-                    KeyCode::Down
-                    | KeyCode::Char('j')
-                    | KeyCode::Char('J') => app.scroll_focused(1),
-                    KeyCode::Up
-                    | KeyCode::Char('k')
-                    | KeyCode::Char('K') => app.scroll_focused(-1),
-                    KeyCode::PageDown | KeyCode::Char(' ') | KeyCode::Char('f') => {
-                        app.scroll_focused(5)
-                    }
-                    KeyCode::PageUp | KeyCode::Char('b') => app.scroll_focused(-5),
-                    KeyCode::Home | KeyCode::Char('g') => {
-                        app.set_scroll(app.focus.pane(), 0);
-                    }
-                    KeyCode::End | KeyCode::Char('G') => {
-                        let id = app.focus.pane();
-                        let max = app.max_scroll_for(id);
-                        app.set_scroll(id, max);
-                    }
-                    // Open tweet under cursor scroll position when announce is focused.
-                    KeyCode::Enter | KeyCode::Char('o') | KeyCode::Char('O') => {
-                        let _ = app.open_focused_tweet();
-                    }
-                    KeyCode::Char(c) if c.is_ascii_digit() => {
-                        let n = c.to_digit(10).unwrap_or(0) as usize;
-                        if (1..=NUM_PANES).contains(&n) {
-                            app.focus = Focus::from_index(n - 1);
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    // Help overlay swallows the key that closes it.
+                    if app.show_help {
+                        app.show_help = false;
+                    } else {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => {
+                                app.should_quit = true;
+                            }
+                            // Raw mode disables ISIG, so Ctrl+C arrives here.
+                            KeyCode::Char('c')
+                                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                            {
+                                app.should_quit = true;
+                            }
+                            KeyCode::Char('r') => {
+                                app.trigger_data();
+                                app.trigger_feed();
+                            }
+                            KeyCode::Char('n') => {
+                                app.set_scroll(PaneId::Announce, 0);
+                                app.trigger_feed();
+                            }
+                            KeyCode::Char('t') => {
+                                // Toggle desktop notifications (env sets initial state).
+                                app.notify_enabled = !app.notify_enabled;
+                                app.status = format!(
+                                    "notifications {}",
+                                    if app.notify_enabled { "on" } else { "off" }
+                                );
+                            }
+                            KeyCode::Char('?') | KeyCode::Char('h') => {
+                                app.show_help = true;
+                            }
+                            KeyCode::Tab => {
+                                app.focus = app.focus.next();
+                            }
+                            KeyCode::BackTab => {
+                                app.focus = app.focus.prev();
+                            }
+                            // Scroll focused pane (mouse wheel targets pane under cursor instead).
+                            KeyCode::Down
+                            | KeyCode::Char('j')
+                            | KeyCode::Char('J') => app.scroll_focused(1),
+                            KeyCode::Up
+                            | KeyCode::Char('k')
+                            | KeyCode::Char('K') => app.scroll_focused(-1),
+                            KeyCode::PageDown | KeyCode::Char(' ') | KeyCode::Char('f') => {
+                                app.scroll_focused(5)
+                            }
+                            KeyCode::PageUp | KeyCode::Char('b') => app.scroll_focused(-5),
+                            KeyCode::Home | KeyCode::Char('g') => {
+                                app.set_scroll(app.focus.pane(), 0);
+                            }
+                            KeyCode::End | KeyCode::Char('G') => {
+                                let id = app.focus.pane();
+                                let max = app.max_scroll_for(id);
+                                app.set_scroll(id, max);
+                            }
+                            // Open tweet under cursor scroll position when announce is focused.
+                            KeyCode::Enter | KeyCode::Char('o') | KeyCode::Char('O') => {
+                                let _ = app.open_focused_tweet();
+                            }
+                            KeyCode::Char(c) if c.is_ascii_digit() => {
+                                let n = c.to_digit(10).unwrap_or(0) as usize;
+                                if (1..=NUM_PANES).contains(&n) {
+                                    app.focus = Focus::from_index(n - 1);
+                                }
+                            }
+                            _ => {}
                         }
                     }
-                    _ => {}
-                },
+                }
                 Event::Mouse(m) => {
+                    if app.show_help {
+                        app.show_help = false;
+                    }
                     // Scroll / click / hover the pane under the cursor.
                     let under = app.pane_areas.hit(m.column, m.row);
                     match m.kind {
@@ -1163,13 +1352,13 @@ pub async fn run_tui(cfg: Config) -> Result<()> {
             break Ok(());
         }
 
-        if app.last_data.elapsed() >= Duration::from_secs(REFRESH_DATA_SECS) {
-            app.refresh_data().await;
-            app.clamp_all_scrolls();
+        // Periodic refreshes — skip the trigger while one is still in flight
+        // so slow endpoints can't stack requests.
+        if !app.data_busy && app.last_data.elapsed() >= Duration::from_secs(REFRESH_DATA_SECS) {
+            app.trigger_data();
         }
-        if app.last_feed.elapsed() >= Duration::from_secs(app.cfg.feed_secs) {
-            app.refresh_feed().await;
-            app.clamp_all_scrolls();
+        if !app.feed_busy && app.last_feed.elapsed() >= Duration::from_secs(app.cfg.feed_secs) {
+            app.trigger_feed();
         }
     };
 
@@ -1230,3 +1419,62 @@ mod tests {
 
 
 
+
+#[cfg(test)]
+mod screenshot_tool {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+    use ratatui::Terminal;
+    use std::io::Write;
+
+    /// Manual screenshot tool — renders the live board (real data, real feed)
+    /// to a PPM image for the README. Run with:
+    ///
+    /// ```sh
+    /// cargo test --release render_readme_screenshot -- --ignored
+    /// sips -s format png /tmp/bullboard.ppm --out docs/bullboard.png
+    /// ```
+    #[test]
+    #[ignore = "manual screenshot tool"]
+    fn render_readme_screenshot() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut app = App::new(Config::from_env(), http_client().unwrap());
+        rt.block_on(async {
+            app.trigger_data();
+            app.trigger_feed();
+            let deadline = Instant::now() + Duration::from_secs(25);
+            while (app.snap.fetched_at.is_none() || app.snap.tweets.is_empty())
+                && Instant::now() < deadline
+            {
+                while let Ok(msg) = app.refresh_rx.try_recv() {
+                    app.handle_msg(msg);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(140, 46)).unwrap();
+        terminal
+            .draw(|f| crate::ui::draw(f, &app))
+            .expect("draw board");
+        let buf = terminal.backend().buffer();
+
+        let mut out = std::fs::File::create("/tmp/bullboard.ppm").unwrap();
+        writeln!(out, "P3\n{} {}\n255", buf.area.width, buf.area.height).unwrap();
+        for cell in &buf.content {
+            let (r, g, b) = match (cell.fg, cell.bg) {
+                (Color::Rgb(r, g, b), _) => (r, g, b),
+                (_, Color::Rgb(r, g, b)) => (r, g, b),
+                _ => (5, 6, 4), // canvas
+            };
+            writeln!(out, "{r} {g} {b}").unwrap();
+        }
+        eprintln!(
+            "wrote /tmp/bullboard.ppm ({}x{}) — price {:?}",
+            buf.area.width,
+            buf.area.height,
+            app.snap.price_usd()
+        );
+    }
+}

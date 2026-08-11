@@ -39,10 +39,6 @@ pub fn fmt_compact(x: Option<f64>) -> String {
     }
 }
 
-pub fn fmt_ansem(x: Option<f64>) -> String {
-    format!("{} ANSEM", fmt_compact(x))
-}
-
 pub fn fmt_int(n: Option<u64>) -> String {
     match n {
         None => "—".into(),
@@ -82,7 +78,7 @@ pub fn delta_str(pct: Option<f64>) -> String {
 
 pub fn sparkline(closes: &[f64], width: usize) -> String {
     if closes.is_empty() || width == 0 {
-        return "─".repeat(width.min(8).max(1));
+        return "─".repeat(width.clamp(1, 8));
     }
     let vals: Vec<f64> = if closes.len() > width {
         let step = closes.len() as f64 / width as f64;
@@ -149,21 +145,6 @@ pub fn clock_mmdd_hhmm(iso: Option<&str>) -> String {
     local.format("%m-%d %H:%M").to_string()
 }
 
-pub fn age_from_ms(ms: Option<u64>) -> String {
-    let Some(ms) = ms else {
-        return "—".into();
-    };
-    let now_ms = Utc::now().timestamp_millis().max(0) as u64;
-    let secs = now_ms.saturating_sub(ms) / 1000;
-    if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h", secs / 3600)
-    } else {
-        format!("{}d", secs / 86400)
-    }
-}
-
 /// Terminal-safe bar using half-width ASCII so columns stay aligned.
 pub fn bar(pct: Option<f64>, width: usize) -> String {
     let width = width.max(4);
@@ -177,14 +158,27 @@ pub fn bar(pct: Option<f64>, width: usize) -> String {
     )
 }
 
-pub fn pad_label(label: &str, width: usize) -> String {
-    let mut s = label.to_string();
-    while s.chars().count() < width {
-        s.push(' ');
-    }
-    if s.chars().count() > width {
-        s.chars().take(width).collect()
-    } else {
-        s
+/// True for announce lines we build as `MM-DD HH:MM POST …`. Byte-level check
+/// so a tweet body that happens to contain " POST " is never mis-tagged.
+pub fn is_post_line(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 17
+        && b[2] == b'-'
+        && b[5] == b' '
+        && b[8] == b':'
+        && &b[11..16] == b" POST"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn post_line_detection_is_structural() {
+        assert!(is_post_line("08-10 12:00 POST just a post"));
+        assert!(!is_post_line("hello POST world")); // body text, not a post line
+        assert!(!is_post_line("  [ view tweet ]  "));
+        assert!(!is_post_line(""));
+        assert!(!is_post_line("08-10 12:00"));
     }
 }

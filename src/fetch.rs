@@ -560,34 +560,127 @@ fn parse_rss(xml: &str, handle: &str) -> Vec<Tweet> {
     tweets
 }
 
+/// Nitter keys its RSS cache on the `?cursor=` param, and every public mirror
+/// runs with `rssMinutes = 10` — without a cursor, every poll gets the same
+/// feed served from Redis, so tweets land ~10 minutes late no matter how fast
+/// we poll. A unique cursor value misses the cache and forces a live fetch
+/// straight from Twitter on every poll.
+fn fresh_cursor() -> String {
+    format!("bb{:x}{:x}", Utc::now().timestamp_millis(), std::process::id())
+}
+
+fn rss_url(base: &str, handle: &str, cursor: Option<&str>) -> String {
+    match cursor {
+        Some(c) => format!("{base}/{handle}/rss?cursor={c}"),
+        None => format!("{base}/{handle}/rss"),
+    }
+}
+
+/// Nitter serves block / rate-limit pages as HTTP 200 HTML — treat anything
+/// that isn't RSS-shaped as a mirror failure.
+fn is_rss(xml: &str) -> bool {
+    let t = xml.trim_start();
+    t.starts_with("<?xml") || t.starts_with("<rss")
+}
+
+fn parse_feed(xml: &str, handle: &str, limit: usize) -> Vec<Tweet> {
+    let mut tweets = parse_rss(xml, handle);
+    // Newest first — created_at is ISO-8601 UTC, so string cmp is chronological.
+    // Sort before truncating so the newest `limit` survive regardless of feed order.
+    tweets.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    tweets.truncate(limit);
+    tweets
+}
+
+/// Newest tweet timestamp in a feed (ISO-8601 UTC → lexicographic == chronological).
+fn newest_created(ts: &[Tweet]) -> Option<&str> {
+    ts.iter().filter_map(|t| t.created_at.as_deref()).max()
+}
+
+/// Choose the best mirror result: the freshest feed wins; ties go to the
+/// earliest mirror. Errors are reported only when every mirror failed.
+fn pick_best_feed(results: Vec<(usize, Result<Vec<Tweet>, String>)>) -> (Vec<Tweet>, Option<String>) {
+    let mut best: Option<(usize, Vec<Tweet>)> = None;
+    let mut errors = Vec::new();
+    for (i, res) in results {
+        match res {
+            Ok(ts) => {
+                let take = match &best {
+                    None => true,
+                    Some((j, bts)) => {
+                        let a = newest_created(&ts);
+                        let b = newest_created(bts);
+                        match (a, b) {
+                            (Some(x), Some(y)) => x > y || (x == y && i < *j),
+                            (Some(_), None) => true,
+                            (None, Some(_)) => false,
+                            (None, None) => i < *j,
+                        }
+                    }
+                };
+                if take {
+                    best = Some((i, ts));
+                }
+            }
+            Err(e) => errors.push(e),
+        }
+    }
+    let failed = best.is_none();
+    let tweets = best.map(|(_, ts)| ts).unwrap_or_default();
+    // Mirror errors only matter when every mirror failed — a working feed
+    // shouldn't show "mirror error" noise in the pane.
+    let err = if failed && !errors.is_empty() {
+        Some(errors.join("; "))
+    } else {
+        None
+    };
+    (tweets, err)
+}
+
 pub async fn fetch_tweets(
     client: &Client,
     handle: &str,
     limit: usize,
+    fresh: bool,
 ) -> (Vec<Tweet>, Option<String>) {
-    let mut errors = Vec::new();
+    // Probe every mirror concurrently so one slow mirror can't stall the feed
+    // (a sequential fallback could stack three 12s timeouts per refresh).
+    // Each mirror: fresh URL first (live fetch), plain URL as a fallback for
+    // mirrors running older Nitter that ignores `cursor`.
+    let nonce = fresh.then(fresh_cursor);
+    let mut tasks = Vec::new();
     for base in NITTER_BASES {
-        let url = format!("{base}/{handle}/rss");
-        match get_text(client, &url).await {
-            Ok(xml) => {
-                // Nitter serves block / rate-limit pages as HTTP 200 HTML —
-                // treat anything that isn't RSS-shaped as a mirror failure.
-                let trimmed = xml.trim_start();
-                if !(trimmed.starts_with("<?xml") || trimmed.starts_with("<rss")) {
-                    errors.push(format!("{base}: not an rss feed"));
-                    continue;
-                }
-                let mut tweets = parse_rss(&xml, handle);
-                // Newest first — created_at is ISO-8601 UTC, so string cmp is chronological.
-                // Sort before truncating so the newest `limit` survive regardless of feed order.
-                tweets.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                tweets.truncate(limit);
-                return (tweets, None);
+        let c = client.clone();
+        let b = (*base).to_string();
+        let h = handle.to_string();
+        let n = nonce.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut errs = Vec::new();
+            let fresh_url = rss_url(&b, &h, n.as_deref());
+            match get_text(&c, &fresh_url).await {
+                Ok(xml) if is_rss(&xml) => return Ok(parse_feed(&xml, &h, limit)),
+                Ok(_) => errs.push(format!("{b}: not an rss feed (fresh)")),
+                Err(e) => errs.push(format!("{b}: {e} (fresh)")),
             }
-            Err(e) => errors.push(format!("{base}: {e}")),
-        }
+            // A stale-but-present feed still beats nothing.
+            let plain_url = rss_url(&b, &h, None);
+            match get_text(&c, &plain_url).await {
+                Ok(xml) if is_rss(&xml) => return Ok(parse_feed(&xml, &h, limit)),
+                Ok(_) => errs.push(format!("{b}: not an rss feed")),
+                Err(e) => errs.push(format!("{b}: {e}")),
+            }
+            Err(errs.join("; "))
+        }));
     }
-    (Vec::new(), Some(errors.join("; ")))
+
+    let mut results = Vec::with_capacity(tasks.len());
+    for (i, t) in tasks.into_iter().enumerate() {
+        results.push((i, match t.await {
+            Ok(r) => r,
+            Err(e) => Err(format!("mirror task: {e}")),
+        }));
+    }
+    pick_best_feed(results)
 }
 
 pub async fn fetch_announce(
@@ -596,7 +689,7 @@ pub async fn fetch_announce(
     _mode: FeedMode,
     limit: usize,
 ) -> (Vec<Tweet>, Option<String>) {
-    fetch_tweets(client, &cfg.x_handle, limit).await
+    fetch_tweets(client, &cfg.x_handle, limit, cfg.fresh_feed).await
 }
 
 pub async fn once_json(cfg: &Config) -> Result<String> {
@@ -679,5 +772,64 @@ mod tests {
         assert_eq!(ts[1].text, "retweeted content");
         assert!(!ts[2].retweet);
         assert_eq!(ts[2].quote_author.as_deref(), Some("Kaiz_294"));
+    }
+
+    fn tweet(id: &str, created: Option<&str>) -> Tweet {
+        Tweet {
+            id: id.into(),
+            text: "x".into(),
+            created_at: created.map(|s| s.into()),
+            url: String::new(),
+            handle: Some("h".into()),
+            retweet: false,
+            retweet_of: None,
+            quote_author: None,
+        }
+    }
+
+    #[test]
+    fn rss_url_adds_cursor_only_when_fresh() {
+        assert_eq!(rss_url("https://n", "blk", None), "https://n/blk/rss");
+        assert_eq!(
+            rss_url("https://n", "blk", Some("bb1")),
+            "https://n/blk/rss?cursor=bb1"
+        );
+    }
+
+    #[test]
+    fn best_feed_prefers_freshest_tweet() {
+        let old = tweet("1", Some("2026-08-10T03:20:03Z"));
+        let new = tweet("2", Some("2026-08-10T03:30:03Z"));
+        let (ts, err) = pick_best_feed(vec![
+            (0, Ok(vec![old])), // earlier mirror, older feed
+            (1, Ok(vec![new])), // later mirror, fresher feed
+        ]);
+        assert_eq!(ts[0].id, "2");
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn best_feed_ties_go_to_earlier_mirror() {
+        let a = tweet("1", Some("2026-08-10T03:20:03Z"));
+        let (ts, _) = pick_best_feed(vec![(0, Ok(vec![a.clone()])), (1, Ok(vec![a]))]);
+        assert_eq!(ts[0].id, "1");
+    }
+
+    #[test]
+    fn best_feed_all_errors_reports_them() {
+        let (ts, err) = pick_best_feed(vec![(0, Err("a".into())), (1, Err("b".into()))]);
+        assert!(ts.is_empty());
+        assert_eq!(err.as_deref(), Some("a; b"));
+    }
+
+    #[test]
+    fn best_feed_success_suppresses_mirror_errors() {
+        let a = tweet("1", Some("2026-08-10T03:20:03Z"));
+        let (ts, err) = pick_best_feed(vec![
+            (0, Ok(vec![a])),
+            (1, Err("dead mirror".into())),
+        ]);
+        assert_eq!(ts[0].id, "1");
+        assert!(err.is_none());
     }
 }

@@ -21,7 +21,7 @@
 
 - **Multi-pane dashboard** — Surfboard / MAXPANE-style layout built on `ratatui`
 - **Hero KPI cards** — `$ANSEM` price, 24h change, volume, liquidity, holders at a glance
-- **Announce feed** — `POST`-badged tweets from `@blknoiz06`, each with a `[ view tweet ]` button
+- **Announce feed** — `POST`-badged tweets from `@blknoiz06`, live within ~30s of posting (bypasses Nitter's 10-minute RSS cache), each with a `[ view tweet ]` button
 - **Live market data** — dual sparklines (price + volume), holder distribution bars, top wallets
 - **Signals & activity** — health signals, DEX flow, and the Bull.inf inference feed
 - **Mouse-first interaction** — hover highlighting, click-to-focus, wheel-to-scroll
@@ -89,6 +89,8 @@ bullboard --handle blknoiz06 # override the announce feed handle
 | `BULLBOARD_X_HANDLE` | `blknoiz06` |
 | `BULLBOARD_MINT` | ANSEM mint |
 | `BULLBOARD_NOTIFY` | `1` — desktop notifications on at launch (default off; toggle anytime with `t`) |
+| `BULLBOARD_FRESH_FEED` | `1` — bypass the mirrors' 10-minute RSS cache: every poll triggers a live fetch, so tweets land within ~30s of posting (set `0` for polite cached mode) |
+| `BULLBOARD_FEED_SECS` | `30` — announce feed poll interval in seconds (min 5) |
 
 ## 📡 Data (public, no keys)
 

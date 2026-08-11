@@ -1,4 +1,4 @@
-use crate::config::{Config, FeedMode, REFRESH_DATA_SECS, REFRESH_FEED_SECS};
+use crate::config::{Config, FeedMode, REFRESH_DATA_SECS};
 use crate::fetch::{fetch_announce, fetch_snapshot, http_client};
 use crate::format::{
     ago, bar, clock_mmdd_hhmm, delta_str, fmt_compact, fmt_int, fmt_usd, short_addr, sparkline,
@@ -1092,7 +1092,7 @@ pub async fn run_tui(cfg: Config) -> Result<()> {
             app.refresh_data().await;
             app.clamp_all_scrolls();
         }
-        if app.last_feed.elapsed() >= Duration::from_secs(REFRESH_FEED_SECS) {
+        if app.last_feed.elapsed() >= Duration::from_secs(app.cfg.feed_secs) {
             app.refresh_feed().await;
             app.clamp_all_scrolls();
         }

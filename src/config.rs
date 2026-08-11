@@ -33,6 +33,11 @@ pub struct Config {
     pub mint: String,
     /// Initial desktop-notify state (BULLBOARD_NOTIFY=1); `t` toggles at runtime.
     pub notify: bool,
+    /// Bypass the mirrors' 10-minute RSS cache with a live fetch per poll
+    /// (BULLBOARD_FRESH_FEED=0 disables — polite mode, ~10 min delayed).
+    pub fresh_feed: bool,
+    /// Announce feed poll interval in seconds (BULLBOARD_FEED_SECS).
+    pub feed_secs: u64,
 }
 
 impl Config {
@@ -47,6 +52,14 @@ impl Config {
             notify: env::var("BULLBOARD_NOTIFY")
                 .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
                 .unwrap_or(false),
+            fresh_feed: env::var("BULLBOARD_FRESH_FEED")
+                .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+                .unwrap_or(true),
+            feed_secs: env::var("BULLBOARD_FEED_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|s: u64| s.max(5))
+                .unwrap_or(REFRESH_FEED_SECS),
         }
     }
 }

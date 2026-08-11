@@ -275,25 +275,40 @@ impl App {
         ]
     }
 
+    /// Total LP across every live pool (DexScreener sum), cross-checked with
+    /// Rugcheck's market-wide total. Primary pool shown as detail/whisper.
     fn lines_primary_lp(&self) -> Vec<String> {
         let t = &self.snap.token;
+        let total = t.total_liquidity();
+        let pools = t.pairs.len();
         let Some(p) = t.primary_pair.as_ref() else {
             return vec![
+                fmt_usd(total),
                 "no pair".into(),
-                format!("mint {}", short_addr(&t.mint, 6)),
-                "—".into(),
+                if pools > 0 {
+                    format!("{pools} pools")
+                } else {
+                    "—".into()
+                },
             ];
         };
-        let total_liq: f64 = t.pairs.iter().filter_map(|x| x.liq_usd).sum();
-        let all = if total_liq > 0.0 {
-            Some(total_liq)
+        let pools_s = if pools == 1 {
+            "1 pool".into()
         } else {
-            t.liquidity
+            format!("{pools} pools")
+        };
+        let whisper = match t.total_market_liq {
+            Some(r) if r > 0.0 => format!("{pools_s} · rug {}", fmt_usd(Some(r))),
+            _ => format!("{pools_s} · primary {}", fmt_usd(p.liq_usd)),
         };
         vec![
-            fmt_usd(p.liq_usd.or(all)),
-            p.dex_id.to_uppercase(),
-            short_addr(&p.pair_address, 5),
+            fmt_usd(total),
+            format!(
+                "{} · {}",
+                p.dex_id.to_uppercase(),
+                short_addr(&p.pair_address, 5)
+            ),
+            whisper,
         ]
     }
 
@@ -395,7 +410,7 @@ impl App {
             if freeze_ok { "disabled · safe" } else { "still enabled" }
         ));
 
-        let liq = t.liquidity.or_else(|| t.primary_pair.as_ref().and_then(|p| p.liq_usd));
+        let liq = t.total_liquidity();
         match liq {
             Some(v) if v >= 500_000.0 => {
                 lines.push(format!("● LIQUIDITY    {} deep", fmt_usd(Some(v))))
@@ -482,15 +497,36 @@ impl App {
             ));
         }
         lines.push(String::new());
-        // Max 4 pairs, one row each.
-        for p in t.pairs.iter().take(4) {
+        // Aggregate liquidity across all pools — per DEX, biggest first.
+        if let Some(tot) = t.total_liquidity() {
+            let pools = t.pairs.len();
             lines.push(format!(
-                "{:<8} {} liq {} vol {} {}",
-                p.dex_id,
-                short_addr(&p.pair_address, 4),
-                fmt_usd(p.liq_usd),
-                fmt_usd(p.vol_h24),
-                delta_str(p.change_h24)
+                "TOTAL LP  {} · {pools} pool{}",
+                fmt_usd(Some(tot)),
+                if pools == 1 { "" } else { "s" }
+            ));
+        }
+        let mut dexs: Vec<(String, f64, f64, usize)> = Vec::new();
+        for p in &t.pairs {
+            let name = p.dex_id.clone();
+            match dexs.iter_mut().find(|(n, _, _, _)| *n == name) {
+                Some(e) => {
+                    e.1 += p.liq_usd.unwrap_or(0.0);
+                    e.2 += p.vol_h24.unwrap_or(0.0);
+                    e.3 += 1;
+                }
+                None => dexs.push((name, p.liq_usd.unwrap_or(0.0), p.vol_h24.unwrap_or(0.0), 1)),
+            }
+        }
+        dexs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (dex, liq, vol, n) in dexs.iter().take(4) {
+            let note = if *n > 1 { format!(" ×{n}") } else { String::new() };
+            lines.push(format!(
+                "{:<9} liq {} vol {}{}",
+                dex,
+                fmt_usd(Some(*liq)),
+                fmt_usd(Some(*vol)),
+                note
             ));
         }
         if t.pairs.is_empty() {
@@ -513,8 +549,7 @@ impl App {
             .or_else(|| p.and_then(|x| x.vol_h24))
             .or_else(|| s.ohlc_stat_f("volume_24h"));
         let liq = t
-            .liquidity
-            .or_else(|| p.and_then(|x| x.liq_usd))
+            .total_liquidity()
             .or_else(|| s.ohlc_stat_f("liquidity_usd"));
         // ≤6 lines: price+24h, windows, blank, vol·liq, price spark, vol spark
         vec![

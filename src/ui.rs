@@ -77,7 +77,7 @@ impl PaneId {
         match self {
             // Top cards: short Surfboard-style labels
             PaneId::Gate => "PRICE",
-            PaneId::Treasury => "PRIMARY LP",
+            PaneId::Treasury => "LIQUIDITY",
             PaneId::Stake => "AUDIT",
             PaneId::Mcap => "SUPPLY",
             PaneId::Announce => "ANNOUNCE FEED",
@@ -792,6 +792,7 @@ fn style_activity(raw: &str) -> Line<'static> {
         || raw.starts_with("1h")
         || raw.starts_with("6h")
         || raw.starts_with("24h")
+        || raw.starts_with("TOTAL LP")
     {
         return Line::from(Span::styled(
             raw.to_string(),

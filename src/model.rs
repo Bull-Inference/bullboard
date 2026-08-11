@@ -123,6 +123,22 @@ pub struct Token {
     pub primary_pair: Option<DexPair>,
 }
 
+impl Token {
+    /// Estimated total liquidity across ALL markets.
+    ///
+    /// Best source: sum of every DexScreener pair's USD liquidity (each pool is
+    /// real, current, per-DEX). Cross-check: Rugcheck's `totalMarketLiquidity`
+    /// aggregates the same markets. Fallback: Jupiter's `liquidity` (top pool).
+    pub fn total_liquidity(&self) -> Option<f64> {
+        let sum: f64 = self.pairs.iter().filter_map(|p| p.liq_usd).sum();
+        if sum > 0.0 {
+            Some(sum)
+        } else {
+            self.total_market_liq.or(self.liquidity)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub price: Value,
